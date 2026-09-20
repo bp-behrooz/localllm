@@ -206,7 +206,8 @@ ensure_host_alias() {
   # Apple's localhost domain installs a pf rule that does not survive a reboot,
   # while `dns list` keeps showing the domain. Redo the setup once per boot.
   local alias="$1" ip="${OC_BOX_HOST_ALIAS_IP:-203.0.113.113}"
-  local stamp="$OC_BOX_HOME/host-alias.boot" boot
+  # Shared between pi-box and opencode-box so only one of them does this per boot.
+  local stamp="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot" boot
   boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
   if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] &&
     container system dns list 2>/dev/null | grep -q "^$alias\b"; then
@@ -217,14 +218,16 @@ ensure_host_alias() {
   sudo container system dns delete "$alias" >/dev/null 2>&1 || true
   sudo container system dns create "$alias" --localhost "$ip"
 
-  if container list 2>/dev/null | grep -qE '^(pi|oc)-'; then
-    echo "warning: other box sessions are running; restart the runtime yourself when they're done:" >&2
-    echo "  container system stop && container system start" >&2
+  if [[ -n "$(container list --quiet 2>/dev/null)" ]]; then
+    echo "error: containers are running, so the runtime can't be restarted to pick up the change." >&2
+    echo "       When they're done:  container system stop && container system start" >&2
+    echo "       then relaunch." >&2
+    exit 1
   else
     container system stop >/dev/null 2>&1 || true
     container system start
   fi
-  mkdir -p "$OC_BOX_HOME"
+  mkdir -p "$(dirname "$stamp")"
   printf '%s' "$boot" >"$stamp"
 }
 
@@ -302,10 +305,10 @@ docker_bridge
 # The box never sees the host's ~/.gitconfig; pass the git identity (if the
 # host has one) so the agent's commits are authored by you.
 GIT_ENV=()
-if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/dev/null) \
-    && [[ -n $name && -n $email ]]; then
-  GIT_ENV=(--env "GIT_AUTHOR_NAME=$name" --env "GIT_AUTHOR_EMAIL=$email" \
-           --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
+if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/dev/null) &&
+  [[ -n $name && -n $email ]]; then
+  GIT_ENV=(--env "GIT_AUTHOR_NAME=$name" --env "GIT_AUTHOR_EMAIL=$email"
+    --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
 fi
 
 # The project is mounted at its Mac path so docker bind-mount paths the agent
