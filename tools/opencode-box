@@ -101,7 +101,7 @@ RUN apt-get update \\
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g --ignore-scripts opencode-ai@${OC_VERSION} \\
+RUN npm install -g opencode-ai@${OC_VERSION} \\
  && npm cache clean --force
 
 # Everything OpenCode persists goes under one mount point
@@ -156,7 +156,11 @@ for m in data:
 if not models:
     sys.exit("error: the server reported no models")
 
-cfg = json.loads(cpath.read_text()) if cpath.is_file() else {"$schema": "https://opencode.ai/config.json"}
+# Seed ponytail only on first run; if the user removes it from the config,
+# we leave it out.
+cfg = json.loads(cpath.read_text()) if cpath.is_file() else {
+    "$schema": "https://opencode.ai/config.json",
+    "plugin": ["@dietrichgebert/ponytail"]}
 prov = cfg.setdefault("provider", {}).setdefault(provider, {})
 prov.setdefault("npm", "@ai-sdk/openai-compatible")
 prov.setdefault("name", "Local LLM")

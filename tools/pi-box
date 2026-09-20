@@ -153,7 +153,10 @@ print("==> synced %d local model(s): %s" % (len(models), ", ".join(m["id"] for m
       file=sys.stderr)
 
 spath = home / "settings.json"
-settings = json.loads(spath.read_text()) if spath.is_file() else {}
+# Seed ponytail only on first run; if the user removes it from the settings,
+# we leave it out.
+settings = json.loads(spath.read_text()) if spath.is_file() else {
+    "packages": ["git:github.com/DietrichGebert/ponytail"]}
 if "defaultProvider" not in settings:
     default = os.environ.get("PI_BOX_DEFAULT") or "local/" + models[0]["id"]
     provider, _, model = default.partition("/")
