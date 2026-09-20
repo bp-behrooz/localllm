@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# opencode-box: run OpenCode in an Apple `container` VM confined to $PWD,
+# with all permissions granted (the VM is the sandbox).
+#
+#   opencode-box [opencode args...]  run (builds the image / syncs models on first use)
+#   opencode-box --rebuild [args...] delete existing image, rebuild, then run
+#   opencode-box --build-only        (re)build the image and exit
+#   opencode-box --sync [args...]    refresh the local model list, then run
+#   opencode-box --sync-only         refresh the local model list and exit
+#
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container).
+#
+# Env knobs:
+#   OC_BOX_VERSION      npm version/tag of opencode-ai (default "latest")
+#   OC_BOX_HOME         host dir for the box's own config/state (default ~/.opencode-box)
+#   OC_BOX_LOCAL_URL    OpenAI-compatible base URL of your LLM server,
+#                       e.g. https://llm.example.com/v1
+#   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
+#   OC_BOX_DEFAULT      fallback model when no last-used model is known,
+#                       e.g. "localllm/qwen3-coder" or "opencode-go/minimax-m2.7"
+#                       (default localllm/<first synced model>)
+#   OPENCODE_API_KEY    passed through for OpenCode Go (built in)
+#   OC_BOX_HIDE         comma-separated provider ids to disable
+#                       (default "opencode", i.e. OpenCode Zen; "" disables nothing)
+#   OC_BOX_DOCKER       1 to expose the Mac's Docker daemon to the box (see notes)
+#   OC_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
+#   OC_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
+#   OC_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+#   OC_BOX_CPUS / OC_BOX_MEMORY  VM sizing (default 4 / 4G)
+set -euo pipefail
+
+IMAGE="opencode-box"
+OC_VERSION="${OC_BOX_VERSION:-latest}"
+OC_BOX_HOME="${OC_BOX_HOME:-$HOME/.opencode-box}"
+PROVIDER="localllm"
+
+# ---------------------------------------------------------------- flags -----
+REBUILD=0
+BUILD_ONLY=0
+SYNC=0
+SYNC_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --rebuild)
+    REBUILD=1
+    shift
+    ;;
+  --build-only)
+    BUILD_ONLY=1
+    shift
+    ;;
+  --sync)
+    SYNC=1
+    shift
+    ;;
+  --sync-only)
+    SYNC_ONLY=1
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  *) break ;; # everything else goes to opencode
+  esac
+done
+
+# ------------------------------------------------------------- helpers ------
+have_image() {
+  container image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+remove_images() {
+  local ids
+  ids=$(container list --all --format json 2>/dev/null |
+    grep -o '"name":"oc-[^"]*"' | cut -d'"' -f4 || true)
+  for c in $ids; do
+    container delete --force "$c" >/dev/null 2>&1 || true
+  done
+  if have_image; then
+    echo "==> removing image $IMAGE" >&2
+    container image delete "$IMAGE" >/dev/null
+  fi
+  container image prune >/dev/null 2>&1 || true
+}
+
+build_image() {
+  local ctx
+  ctx=$(mktemp -d)
+  trap 'rm -rf "$ctx"' RETURN
+
+  cat >"$ctx/Dockerfile" <<EOF
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends \\
+      ca-certificates curl git ripgrep fd-find jq make openssh-client \\
+      python3 unzip less nodejs npm \\
+      docker.io docker-compose-v2 docker-buildx \\
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g --ignore-scripts opencode-ai@${OC_VERSION} \\
+ && npm cache clean --force
+
+# Everything OpenCode persists goes under one mount point
+ENV XDG_CONFIG_HOME=/root/.opencode-box/config \\
+    XDG_DATA_HOME=/root/.opencode-box/data \\
+    XDG_STATE_HOME=/root/.opencode-box/state \\
+    XDG_CACHE_HOME=/root/.opencode-box/cache
+
+ENTRYPOINT ["opencode"]
+EOF
+
+  echo "==> building image $IMAGE (opencode-ai@$OC_VERSION)" >&2
+  container build --tag "$IMAGE" "$ctx"
+}
+
+config_path() { echo "$OC_BOX_HOME/config/opencode/opencode.json"; }
+
+sync_models() {
+  # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
+  # the localllm provider's models map. Other providers and hand-edited fields
+  # are kept. Seeds the config on first run.
+  : "${OC_BOX_LOCAL_URL:?set OC_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+  : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
+  mkdir -p "$(dirname "$(config_path)")"
+
+  OC_CONFIG="$(config_path)" OC_BOX_DEFAULT="${OC_BOX_DEFAULT:-}" PROVIDER="$PROVIDER" \
+    python3 - <<'PYEOF'
+import json, os, sys, urllib.request
+from pathlib import Path
+
+cpath    = Path(os.environ["OC_CONFIG"])
+base     = os.environ["OC_BOX_LOCAL_URL"].rstrip("/")
+key      = os.environ["LOCAL_LLM_API_KEY"]
+provider = os.environ["PROVIDER"]
+root     = base[:-3] if base.endswith("/v1") else base
+
+req = urllib.request.Request(f"{root}/model/info",
+                             headers={"Authorization": f"Bearer {key}"})
+try:
+    data = json.load(urllib.request.urlopen(req, timeout=15))["data"]
+except Exception as e:
+    sys.exit(f"error: could not fetch {root}/model/info: {e}")
+
+models = {}
+for m in data:
+    name = m["model_name"]
+    entry = {"name": name}
+    ctx = (m.get("model_info") or {}).get("max_input_tokens")
+    if ctx:
+        entry["limit"] = {"context": ctx, "output": min(32768, ctx // 4)}
+    models[name] = entry
+if not models:
+    sys.exit("error: the server reported no models")
+
+cfg = json.loads(cpath.read_text()) if cpath.is_file() else {"$schema": "https://opencode.ai/config.json"}
+prov = cfg.setdefault("provider", {}).setdefault(provider, {})
+prov.setdefault("npm", "@ai-sdk/openai-compatible")
+prov.setdefault("name", "Local LLM")
+opts = prov.setdefault("options", {})
+opts["baseURL"] = base
+opts.setdefault("apiKey", "{env:LOCAL_LLM_API_KEY}")   # resolved by opencode at runtime
+prov["models"] = models
+
+if "model" not in cfg:
+    cfg["model"] = os.environ.get("OC_BOX_DEFAULT") or f"{provider}/{next(iter(models))}"
+    print("==> fallback model %s" % cfg["model"], file=sys.stderr)
+
+cpath.write_text(json.dumps(cfg, indent=2) + "\n")
+print("==> synced %d local model(s): %s" % (len(models), ", ".join(models)), file=sys.stderr)
+PYEOF
+}
+
+ensure_settings() {
+  # Every launch: full permissions (the VM is the boundary) and the provider
+  # blocklist from OC_BOX_HIDE. Leaves everything else in the config alone.
+  mkdir -p "$(dirname "$(config_path)")"
+  OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+cpath = Path(os.environ["OC_CONFIG"])
+cfg = json.loads(cpath.read_text()) if cpath.is_file() else {"$schema": "https://opencode.ai/config.json"}
+before = json.dumps(cfg, sort_keys=True)
+
+cfg["permission"] = "allow"
+hide = [p.strip() for p in os.environ["OC_BOX_HIDE"].split(",") if p.strip()]
+if hide:
+    cfg["disabled_providers"] = hide
+else:
+    cfg.pop("disabled_providers", None)
+
+if json.dumps(cfg, sort_keys=True) != before:
+    cpath.write_text(json.dumps(cfg, indent=2) + "\n")
+PYEOF
+}
+
+ensure_host_alias() {
+  # Apple's localhost domain installs a pf rule that does not survive a reboot,
+  # while `dns list` keeps showing the domain. Redo the setup once per boot.
+  local alias="$1" ip="${OC_BOX_HOST_ALIAS_IP:-203.0.113.113}"
+  local stamp="$OC_BOX_HOME/host-alias.boot" boot
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
+  if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] &&
+    container system dns list 2>/dev/null | grep -q "^$alias\b"; then
+    return 0
+  fi
+
+  echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
+  sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+  sudo container system dns create "$alias" --localhost "$ip"
+
+  if container list 2>/dev/null | grep -qE '^(pi|oc)-'; then
+    echo "warning: other box sessions are running; restart the runtime yourself when they're done:" >&2
+    echo "  container system stop && container system start" >&2
+  else
+    container system stop >/dev/null 2>&1 || true
+    container system start
+  fi
+  mkdir -p "$OC_BOX_HOME"
+  printf '%s' "$boot" >"$stamp"
+}
+
+docker_bridge() {
+  # Expose the Mac's Docker socket to the box via socat on 127.0.0.1 plus
+  # Apple's localhost DNS domain. NOTE: whatever the daemon can reach on the
+  # Mac (colima: its mount list), the agent can reach through docker.
+  [[ "${OC_BOX_DOCKER:-0}" == "1" ]] || return 0
+  command -v socat >/dev/null || {
+    echo "error: OC_BOX_DOCKER needs socat (brew install socat)" >&2
+    exit 1
+  }
+
+  local alias="${OC_BOX_HOST_ALIAS:-host.container.internal}"
+  ensure_host_alias "$alias"
+
+  local sock="${OC_BOX_DOCKER_SOCK:-}"
+  if [[ -z "$sock" ]]; then
+    for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
+      "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
+      [[ -S "$c" ]] && {
+        sock="$c"
+        break
+      }
+    done
+  fi
+  [[ -S "${sock:-}" ]] || {
+    echo "error: no Docker socket found; set OC_BOX_DOCKER_SOCK" >&2
+    exit 1
+  }
+
+  DOCKER_PORT=$((20000 + RANDOM % 20000))
+  socat "TCP-LISTEN:$DOCKER_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
+  SOCAT_PID=$!
+  trap 'kill "$SOCAT_PID" 2>/dev/null' EXIT
+  DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$DOCKER_PORT")
+  echo "==> docker: $sock -> tcp://$alias:$DOCKER_PORT (this session only)" >&2
+}
+
+# ---------------------------------------------------------------- main ------
+if [[ $SYNC_ONLY -eq 1 ]]; then
+  sync_models
+  exit 0
+fi
+
+if ! command -v container >/dev/null 2>&1; then
+  echo "error: 'container' CLI not found. Install with: brew install container" >&2
+  exit 1
+fi
+
+if ! container system status >/dev/null 2>&1; then
+  echo "==> starting container runtime" >&2
+  container system start
+fi
+
+if [[ $REBUILD -eq 1 ]]; then
+  remove_images
+  build_image
+elif [[ $BUILD_ONLY -eq 1 ]] || ! have_image; then
+  build_image
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+if [[ $SYNC -eq 1 || ! -f "$(config_path)" ]]; then
+  sync_models
+fi
+ensure_settings
+
+DOCKER_ENV=()
+docker_bridge
+
+# The project is mounted at its Mac path so docker bind-mount paths the agent
+# uses (-v $(pwd):/app) mean the same thing to the Mac's daemon.
+# not exec: the trap above must outlive opencode to stop socat
+container run -it --rm \
+  --name "oc-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$" \
+  --volume "$PWD:$PWD" \
+  --workdir "$PWD" \
+  --volume "$OC_BOX_HOME:/root/.opencode-box" \
+  --tmpfs /tmp \
+  --cpus "${OC_BOX_CPUS:-4}" --memory "${OC_BOX_MEMORY:-4G}" \
+  --env LOCAL_LLM_API_KEY \
+  --env OPENCODE_API_KEY \
+  ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
+  "$IMAGE" "$@"

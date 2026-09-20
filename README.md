@@ -15,7 +15,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool.py` | the server: bearer-key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
-| `sync-opencode-models` | writes the served models (with context sizes) into OpenCode's config; run on your workstation |
+| `tools/pi-box`, `tools/opencode-box` | run the pi / OpenCode agent in a sandboxed VM (Apple `container`); sync the served models on launch |
 
 ## Requirements
 
@@ -108,20 +108,22 @@ example.com {
 Clients then use base URL `https://example.com/localllm/v1` with the master
 key as API key.
 
-## OpenCode
+## Agents (pi / OpenCode)
 
-One-time bootstrap (creates/updates the `localllm` provider in
-`~/.config/opencode/opencode.json`):
+`tools/pi-box` and `tools/opencode-box` run the respective agent in a
+sandboxed Apple `container` VM (Apple Silicon, macOS 26). They take the
+server's base URL and key from the environment:
 
 ```bash
-./sync-opencode-models --base-url https://example.com/localllm/v1 --api-key sk-xxx
+export PI_BOX_LOCAL_URL=https://example.com/localllm/v1   # OC_BOX_LOCAL_URL for opencode-box
+export LOCAL_LLM_API_KEY=sk-xxx
+./tools/pi-box          # or: ./tools/opencode-box
 ```
 
-After that, re-run `./sync-opencode-models` (no arguments) whenever the
-preset list changes — it queries the server and rewrites the provider's models
-map, including per-model context limits. Note: the config is rewritten as
-plain JSON, so comments in it don't survive; keep hand-written config in a
-project-level `opencode.json` (OpenCode merges configs) if you want comments.
+On first launch (or with `--sync`) they query the server and write the served
+models, with context limits, into the box's own config under `~/.pi-box` /
+`~/.opencode-box` — re-run with `--sync` after preset changes. See each
+script's header for the full list of knobs.
 
 ## License
 

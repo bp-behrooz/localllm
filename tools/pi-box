@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# pi-box: run the pi coding agent in an Apple `container` VM confined to $PWD.
+#
+#   pi-box [pi args...]        run pi (builds the image / syncs models on first use)
+#   pi-box --rebuild [args...] delete existing pi-box image(s), rebuild, then run
+#   pi-box --build-only        (re)build the image and exit
+#   pi-box --sync [args...]    refresh the local model list from the server, then run
+#   pi-box --sync-only         refresh the local model list and exit
+#
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container).
+#
+# Env knobs:
+#   PI_BOX_VERSION      npm version/tag of pi (default "latest")
+#   PI_BOX_HOME         host dir for the box's own pi config/state (default ~/.pi-box)
+#   PI_BOX_LOCAL_URL    OpenAI-compatible base URL of your LLM server,
+#                       e.g. https://llm.example.com/v1
+#   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
+#   PI_BOX_DEFAULT      default provider/model, e.g. "local/qwen3-coder" or
+#                       "opencode-go/minimax-m2.7" (default local/<first synced model>)
+#   OPENCODE_API_KEY    passed through for OpenCode Go/Zen (built into pi)
+#   PI_BOX_HIDE         comma-separated provider ids to hide from /model
+#                       (default "opencode", i.e. OpenCode Zen; "" hides nothing)
+#   PI_BOX_CPUS / PI_BOX_MEMORY  VM sizing (default 4 / 4G)
+#   PI_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Installs the
+#                       docker CLI in the image and, on launch, bridges your Docker
+#                       socket to TCP on the container network with socat.
+#                       Rebuild the image after changing this.
+#                       Sets up Apple's localhost DNS domain for container->Mac
+#                       traffic automatically (sudo prompt, once per boot).
+#   PI_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
+#   PI_BOX_HOST_ALIAS   the localhost domain name (default host.container.internal)
+#   PI_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+#   PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION  passed through for pi-anthropic-oauth
+set -euo pipefail
+
+IMAGE="pi-box"
+PI_VERSION="${PI_BOX_VERSION:-latest}"
+PI_BOX_HOME="${PI_BOX_HOME:-$HOME/.pi-box}"
+
+# ---------------------------------------------------------------- flags -----
+REBUILD=0; BUILD_ONLY=0; SYNC=0; SYNC_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rebuild)    REBUILD=1; shift ;;
+    --build-only) BUILD_ONLY=1; shift ;;
+    --sync)       SYNC=1; shift ;;
+    --sync-only)  SYNC_ONLY=1; shift ;;
+    --)           shift; break ;;
+    *)            break ;;   # everything else goes to pi
+  esac
+done
+
+# ------------------------------------------------------------- helpers ------
+have_image() {
+  container image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+remove_images() {
+  local ids
+  ids=$(container list --all --format json 2>/dev/null \
+        | grep -o '"name":"pi-[^"]*"' | cut -d'"' -f4 || true)
+  for c in $ids; do
+    container delete --force "$c" >/dev/null 2>&1 || true
+  done
+  if have_image; then
+    echo "==> removing image $IMAGE" >&2
+    container image delete "$IMAGE" >/dev/null
+  fi
+  container image prune >/dev/null 2>&1 || true
+}
+
+build_image() {
+  local ctx DOCKER_LAYER=""
+  ctx=$(mktemp -d)
+  trap 'rm -rf "$ctx"' RETURN
+
+  if [[ "${PI_BOX_DOCKER:-0}" == "1" ]]; then
+    # CLI + compose only; the daemon runs on the Mac (see docker_bridge)
+    DOCKER_LAYER='RUN apt-get update \
+ && apt-get install -y --no-install-recommends docker.io docker-compose-v2 docker-buildx \
+ && rm -rf /var/lib/apt/lists/*'
+  fi
+
+  cat > "$ctx/Dockerfile" <<EOF
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Node 22 ships in 26.04's repos, so no NodeSource needed
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends \\
+      ca-certificates curl git ripgrep fd-find jq make openssh-client \\
+      python3 unzip less nodejs npm \\
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \\
+ && npm cache clean --force
+${DOCKER_LAYER}
+
+ENTRYPOINT ["pi"]
+EOF
+
+  echo "==> building image $IMAGE (pi@$PI_VERSION)" >&2
+  container build --tag "$IMAGE" "$ctx"
+}
+
+sync_models() {
+  # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
+  # the "local" provider's model list in models.json. Other providers and any
+  # hand-edited fields are kept. Seeds settings.json on first run.
+  : "${PI_BOX_LOCAL_URL:?set PI_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+  : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
+  mkdir -p "$PI_BOX_HOME/agent/sessions"
+
+  PI_BOX_HOME="$PI_BOX_HOME" PI_BOX_DEFAULT="${PI_BOX_DEFAULT:-}" python3 - <<'PYEOF'
+import json, os, sys, urllib.request
+from pathlib import Path
+
+home = Path(os.environ["PI_BOX_HOME"]) / "agent"
+base = os.environ["PI_BOX_LOCAL_URL"].rstrip("/")
+key  = os.environ["LOCAL_LLM_API_KEY"]
+root = base[:-3] if base.endswith("/v1") else base
+
+req = urllib.request.Request(f"{root}/model/info",
+                             headers={"Authorization": f"Bearer {key}"})
+try:
+    data = json.load(urllib.request.urlopen(req, timeout=15))["data"]
+except Exception as e:
+    sys.exit(f"error: could not fetch {root}/model/info: {e}")
+
+models = []
+for m in data:
+    entry = {"id": m["model_name"]}
+    ctx = (m.get("model_info") or {}).get("max_input_tokens")
+    if ctx:
+        entry["contextWindow"] = ctx
+        entry["maxTokens"] = min(32768, ctx // 4)
+    models.append(entry)
+if not models:
+    sys.exit("error: the server reported no models")
+
+mpath = home / "models.json"
+cfg = json.loads(mpath.read_text()) if mpath.is_file() else {}
+prov = cfg.setdefault("providers", {}).setdefault("local", {})
+prov["baseUrl"] = base
+prov.setdefault("api", "openai-completions")
+prov.setdefault("apiKey", "$LOCAL_LLM_API_KEY")   # resolved by pi at request time
+prov.setdefault("compat", {"supportsDeveloperRole": False,
+                           "supportsReasoningEffort": False})
+prov["models"] = models
+mpath.write_text(json.dumps(cfg, indent=2) + "\n")
+print("==> synced %d local model(s): %s" % (len(models), ", ".join(m["id"] for m in models)),
+      file=sys.stderr)
+
+spath = home / "settings.json"
+settings = json.loads(spath.read_text()) if spath.is_file() else {}
+if "defaultProvider" not in settings:
+    default = os.environ.get("PI_BOX_DEFAULT") or "local/" + models[0]["id"]
+    provider, _, model = default.partition("/")
+    settings["defaultProvider"] = provider
+    settings["defaultModel"] = model
+    print("==> default model %s" % default, file=sys.stderr)
+spath.write_text(json.dumps(settings, indent=2) + "\n")
+PYEOF
+}
+
+ensure_settings() {
+  # Runs every launch. Makes sure the pi-hide-providers extension is listed in
+  # settings.json (pi installs it on start) and writes the hide rules from
+  # PI_BOX_HIDE. Does not touch models.
+  mkdir -p "$PI_BOX_HOME/agent"
+  PI_BOX_HOME="$PI_BOX_HOME" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+home = Path(os.environ["PI_BOX_HOME"]) / "agent"
+
+spath = home / "settings.json"
+settings = json.loads(spath.read_text()) if spath.is_file() else {}
+pkgs = settings.setdefault("packages", [])
+if not any(isinstance(p, str) and "pi-hide-providers" in p for p in pkgs):
+    pkgs.append("npm:pi-hide-providers")
+    spath.write_text(json.dumps(settings, indent=2) + "\n")
+
+hide = [p.strip() for p in os.environ["PI_BOX_HIDE"].split(",") if p.strip()]
+hpath = home / "hide-providers.json"
+if hide:
+    hpath.write_text(json.dumps({"hide": [{"provider": p} for p in hide]}, indent=2) + "\n")
+elif hpath.is_file():
+    hpath.unlink()
+PYEOF
+}
+
+ensure_host_alias() {
+  # Apple's localhost domain installs a pf rule that does not survive a reboot,
+  # while `dns list` keeps showing the domain. So: redo the setup (needs sudo)
+  # once per boot, tracked by kernel boot time.
+  local alias="$1" ip="${PI_BOX_HOST_ALIAS_IP:-203.0.113.113}"
+  local stamp="$PI_BOX_HOME/host-alias.boot" boot
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
+  if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] \
+     && container system dns list 2>/dev/null | grep -q "^$alias\b"; then
+    return 0
+  fi
+
+  echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
+  sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+  sudo container system dns create "$alias" --localhost "$ip"
+
+  # The runtime needs a restart to pick up the change. Don't yank it out from
+  # under other running pi-box sessions.
+  if container list 2>/dev/null | grep -q '^pi-'; then
+    echo "warning: other pi-box sessions are running; restart the runtime yourself when they're done:" >&2
+    echo "  container system stop && container system start" >&2
+  else
+    container system stop >/dev/null 2>&1 || true
+    container system start
+  fi
+  mkdir -p "$PI_BOX_HOME"
+  printf '%s' "$boot" > "$stamp"
+}
+
+docker_bridge() {
+  # Expose the Mac's Docker socket to the box. Unix sockets can't be bind-mounted
+  # into the VM, and containers can't reach the Mac at the bridge gateway IP by
+  # default. Apple's supported route is a "localhost" DNS domain: it installs a
+  # pf rule that redirects a chosen IP to the Mac's loopback, so we listen on
+  # 127.0.0.1 with socat and let the box connect by name.
+  [[ "${PI_BOX_DOCKER:-0}" == "1" ]] || return 0
+  command -v socat >/dev/null || { echo "error: PI_BOX_DOCKER needs socat (brew install socat)" >&2; exit 1; }
+
+  local alias="${PI_BOX_HOST_ALIAS:-host.container.internal}"
+  ensure_host_alias "$alias"
+
+  local sock="${PI_BOX_DOCKER_SOCK:-}"
+  if [[ -z "$sock" ]]; then
+    for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
+             "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
+      [[ -S "$c" ]] && { sock="$c"; break; }
+    done
+  fi
+  [[ -S "${sock:-}" ]] || { echo "error: no Docker socket found; set PI_BOX_DOCKER_SOCK" >&2; exit 1; }
+
+  DOCKER_PORT=$(( 20000 + RANDOM % 20000 ))
+  socat "TCP-LISTEN:$DOCKER_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
+  SOCAT_PID=$!
+  trap 'kill "$SOCAT_PID" 2>/dev/null' EXIT
+  DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$DOCKER_PORT")
+  echo "==> docker: $sock -> tcp://$alias:$DOCKER_PORT (this session only)" >&2
+}
+
+# ---------------------------------------------------------------- main ------
+if [[ $SYNC_ONLY -eq 1 ]]; then
+  sync_models
+  exit 0
+fi
+
+if ! command -v container >/dev/null 2>&1; then
+  echo "error: 'container' CLI not found. Install with: brew install container" >&2
+  exit 1
+fi
+
+if ! container system status >/dev/null 2>&1; then
+  echo "==> starting container runtime" >&2
+  container system start
+fi
+
+if [[ $REBUILD -eq 1 ]]; then
+  remove_images
+  build_image
+elif [[ $BUILD_ONLY -eq 1 ]] || ! have_image; then
+  build_image
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+if [[ $SYNC -eq 1 || ! -f "$PI_BOX_HOME/agent/models.json" ]]; then
+  sync_models
+fi
+ensure_settings
+
+DOCKER_ENV=()
+docker_bridge
+
+# The project is mounted at its Mac path, not /work, so bind-mount paths the
+# agent hands to docker (-v $(pwd):/app, compose ./data:...) mean the same
+# thing to the Mac's daemon. Also keeps pi's per-project sessions separate.
+# not exec: the trap above must outlive pi to stop socat
+container run -it --rm \
+  --name "pi-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$" \
+  --volume "$PWD:$PWD" \
+  --workdir "$PWD" \
+  --volume "$PI_BOX_HOME:/root/.pi" \
+  --tmpfs /tmp \
+  --cpus "${PI_BOX_CPUS:-4}" --memory "${PI_BOX_MEMORY:-4G}" \
+  --env LOCAL_LLM_API_KEY \
+  --env OPENCODE_API_KEY \
+  --env PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION \
+  ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
+  "$IMAGE" "$@"
