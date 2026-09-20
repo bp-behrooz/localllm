@@ -295,6 +295,15 @@ ensure_settings
 DOCKER_ENV=()
 docker_bridge
 
+# The box never sees the host's ~/.gitconfig; pass the git identity (if the
+# host has one) so the agent's commits are authored by you.
+GIT_ENV=()
+if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/dev/null) \
+    && [[ -n $name && -n $email ]]; then
+  GIT_ENV=(--env "GIT_AUTHOR_NAME=$name" --env "GIT_AUTHOR_EMAIL=$email" \
+           --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
+fi
+
 # The project is mounted at its Mac path so docker bind-mount paths the agent
 # uses (-v $(pwd):/app) mean the same thing to the Mac's daemon.
 # not exec: the trap above must outlive opencode to stop socat
@@ -308,4 +317,5 @@ container run -it --rm \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
+  ${GIT_ENV[@]+"${GIT_ENV[@]}"} \
   "$IMAGE" "$@"
