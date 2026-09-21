@@ -6,7 +6,8 @@
 #   pi-box --build-only        (re)build the image and exit
 #   pi-box --sync [args...]    refresh the local model list from the server, then run
 #   pi-box --sync-only         refresh the local model list and exit
-#   pi-box --ssh [args...]     forward your ssh-agent into the box (same as PI_BOX_SSH=1)
+#   pi-box --ssh [args...]     forward your ssh-agent into the box, and pass the
+#                              host's gh token along (same as PI_BOX_SSH=1)
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container).
 #
@@ -23,6 +24,7 @@
 #                       (default "opencode", i.e. OpenCode Zen; "" hides nothing)
 #   PI_BOX_CPUS / PI_BOX_MEMORY  VM sizing (default 4 / 4G)
 #   PI_BOX_SSH          1: forward your ssh-agent into the box (container run --ssh)
+#                       and, so `gh` works too, pass `gh auth token` from the host
 #   PI_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Bridges your
 #                       Docker socket to TCP with socat and sets up Apple's localhost
 #                       DNS domain for container->Mac traffic (sudo, once per boot).
@@ -107,6 +109,16 @@ RUN apt-get update \\
       python3 unzip less nodejs npm \\
       docker.io docker-compose-v2 docker-buildx \\
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
+ && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI: Ubuntu's own package lags years behind, so use GitHub's repo
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \\
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \\
+ && echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
+      > /etc/apt/sources.list.d/github-cli.list \\
+ && apt-get update \\
+ && apt-get install -y --no-install-recommends gh \\
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \\
@@ -323,6 +335,20 @@ if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/
     --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
 fi
 
+# The agent socket authenticates git over ssh, but GitHub's API only takes a
+# token, so `gh pr view`/`gh api` stay locked out. Hand the box the host's gh
+# token alongside the agent. Exported rather than passed by value: `--env NAME`
+# inherits it, keeping the token out of the host's process list.
+GH_ENV=()
+if [[ -n ${PI_BOX_SSH:-} ]]; then
+  if GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n $GH_TOKEN ]]; then
+    export GH_TOKEN
+    GH_ENV=(--env GH_TOKEN)
+  else
+    echo "==> --ssh: no gh token on the host (run \`gh auth login\`); gh stays logged out in the box" >&2
+  fi
+fi
+
 # The project is mounted at its Mac path, not /work, so bind-mount paths the
 # agent hands to docker (-v $(pwd):/app, compose ./data:...) mean the same
 # thing to the Mac's daemon. Also keeps pi's per-project sessions separate.
@@ -339,5 +365,6 @@ container run -it --rm \
   --env PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION \
   ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
   ${GIT_ENV[@]+"${GIT_ENV[@]}"} \
+  ${GH_ENV[@]+"${GH_ENV[@]}"} \
   ${PI_BOX_SSH:+--ssh} \
   "$IMAGE" "$@"
