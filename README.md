@@ -16,6 +16,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool.py` | the server: bearer-key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
 | `tools/pi-box`, `tools/opencode-box` | run the pi / OpenCode agent in a sandboxed VM (Apple `container`); sync the served models on launch |
+| `tools/claude-box` | same sandbox for Claude Code; unrelated to this server, it talks to Anthropic as usual |
 
 ## Requirements
 

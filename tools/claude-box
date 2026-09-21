@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# claude-box: run Claude Code in an Apple `container` VM confined to $PWD,
+# with all permissions granted (the VM is the sandbox).
+#
+# Unrelated to the rest of this repo: it talks to Anthropic as usual, the box
+# is only here for the sandboxing.
+#
+#   claude-box [claude args...]  run (builds the image on first use)
+#   claude-box --rebuild [args...] delete existing image, rebuild, then run
+#   claude-box --build-only        (re)build the image and exit
+#   claude-box --ssh [args...]     forward your ssh-agent into the box (same as CL_BOX_SSH=1)
+#
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container).
+#
+# First run: log in inside the box (`/login`, or set ANTHROPIC_API_KEY); the
+# credentials land in CL_BOX_HOME and are reused after that.
+#
+# Env knobs:
+#   CL_BOX_VERSION      npm version/tag of @anthropic-ai/claude-code (default "latest")
+#   CL_BOX_HOME         host dir for the box's own Claude config/state (default ~/.claude-box)
+#   ANTHROPIC_API_KEY   passed into the container if set, never written to disk
+#   ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL  passed through if set
+#   CL_BOX_YOLO         0 to keep Claude's own permission prompts (default 1:
+#                       permissions.defaultMode=bypassPermissions, the VM is the
+#                       boundary; the --dangerously-skip-permissions flag itself
+#                       is refused because the box runs as root)
+#   CL_BOX_TRUST        0 to keep the "do you trust this folder?" prompt (default
+#                       1: projects[$PWD].hasTrustDialogAccepted is pre-set in
+#                       the box's .claude.json)
+#   CL_BOX_MOUSE        1 to let Claude capture the mouse (wheel scroll, clickable
+#                       file paths). Default 0: mouse reporting stays off, so the
+#                       terminal's own click-drag selection/copy keeps working.
+#   CL_BOX_CPUS / CL_BOX_MEMORY  VM sizing (default 4 / 4G)
+#   CL_BOX_SSH          1: forward your ssh-agent into the box (container run --ssh)
+#   CL_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Bridges your
+#                       Docker socket to TCP with socat and sets up Apple's localhost
+#                       DNS domain for container->Mac traffic (sudo, once per boot).
+#   CL_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
+#   CL_BOX_HOST_ALIAS   the localhost domain name (default host.container.internal)
+#   CL_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+set -euo pipefail
+
+IMAGE="claude-box"
+CL_VERSION="${CL_BOX_VERSION:-latest}"
+CL_BOX_HOME="${CL_BOX_HOME:-$HOME/.claude-box}"
+
+# ---------------------------------------------------------------- flags -----
+REBUILD=0
+BUILD_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --rebuild)
+    REBUILD=1
+    shift
+    ;;
+  --build-only)
+    BUILD_ONLY=1
+    shift
+    ;;
+  --ssh)
+    CL_BOX_SSH=1
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  *) break ;; # everything else goes to claude
+  esac
+done
+
+# ------------------------------------------------------------- helpers ------
+have_image() {
+  container image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+remove_images() {
+  local ids
+  ids=$(container list --all --format json 2>/dev/null |
+    grep -o '"name":"cl-[^"]*"' | cut -d'"' -f4 || true)
+  for c in $ids; do
+    container delete --force "$c" >/dev/null 2>&1 || true
+  done
+  if have_image; then
+    echo "==> removing image $IMAGE" >&2
+    container image delete "$IMAGE" >/dev/null
+  fi
+  container image prune >/dev/null 2>&1 || true
+}
+
+build_image() {
+  local ctx
+  ctx=$(mktemp -d)
+  trap 'rm -rf "$ctx"' RETURN
+
+  cat >"$ctx/Dockerfile" <<EOF
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Node 22 ships in 26.04's repos, so no NodeSource needed
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends \\
+      ca-certificates curl git ripgrep fd-find jq make openssh-client \\
+      python3 unzip less nodejs npm \\
+      docker.io docker-compose-v2 docker-buildx \\
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code@${CL_VERSION} \\
+ && npm cache clean --force
+
+# Keep everything Claude persists (creds, history, projects) under one mount
+ENV CLAUDE_CONFIG_DIR=/root/.claude-box
+
+ENTRYPOINT ["claude"]
+EOF
+
+  echo "==> building image $IMAGE (@anthropic-ai/claude-code@$CL_VERSION)" >&2
+  container build --tag "$IMAGE" "$ctx"
+}
+
+ensure_host_alias() {
+  # Apple's localhost domain installs a pf rule that does not survive a reboot,
+  # while `dns list` keeps showing the domain. Redo the setup once per boot.
+  local alias="$1" ip="${CL_BOX_HOST_ALIAS_IP:-203.0.113.113}"
+  # Shared between the *-box scripts so only one of them does this per boot.
+  local stamp="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot" boot
+  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
+  if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] &&
+    container system dns list 2>/dev/null | grep -q "^$alias\b"; then
+    return 0
+  fi
+
+  echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
+  sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+  sudo container system dns create "$alias" --localhost "$ip"
+
+  if [[ -n "$(container list --quiet 2>/dev/null)" ]]; then
+    echo "error: containers are running, so the runtime can't be restarted to pick up the change." >&2
+    echo "       When they're done:  container system stop && container system start" >&2
+    echo "       then relaunch." >&2
+    exit 1
+  else
+    container system stop >/dev/null 2>&1 || true
+    container system start
+  fi
+  mkdir -p "$(dirname "$stamp")"
+  printf '%s' "$boot" >"$stamp"
+}
+
+docker_bridge() {
+  # Expose the Mac's Docker socket to the box via socat on 127.0.0.1 plus
+  # Apple's localhost DNS domain. NOTE: whatever the daemon can reach on the
+  # Mac (colima: its mount list), the agent can reach through docker.
+  [[ "${CL_BOX_DOCKER:-0}" == "1" ]] || return 0
+  command -v socat >/dev/null || {
+    echo "error: CL_BOX_DOCKER needs socat (brew install socat)" >&2
+    exit 1
+  }
+
+  local alias="${CL_BOX_HOST_ALIAS:-host.container.internal}"
+  ensure_host_alias "$alias"
+
+  local sock="${CL_BOX_DOCKER_SOCK:-}"
+  if [[ -z "$sock" ]]; then
+    for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
+      "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
+      [[ -S "$c" ]] && {
+        sock="$c"
+        break
+      }
+    done
+  fi
+  [[ -S "${sock:-}" ]] || {
+    echo "error: no Docker socket found; set CL_BOX_DOCKER_SOCK" >&2
+    exit 1
+  }
+
+  DOCKER_PORT=$((20000 + RANDOM % 20000))
+  socat "TCP-LISTEN:$DOCKER_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
+  SOCAT_PID=$!
+  trap 'kill "$SOCAT_PID" 2>/dev/null' EXIT
+  DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$DOCKER_PORT")
+  echo "==> docker: $sock -> tcp://$alias:$DOCKER_PORT (this session only)" >&2
+}
+
+# ---------------------------------------------------------------- main ------
+if ! command -v container >/dev/null 2>&1; then
+  echo "error: 'container' CLI not found. Install with: brew install container" >&2
+  exit 1
+fi
+
+if ! container system status >/dev/null 2>&1; then
+  echo "==> starting container runtime" >&2
+  container system start
+fi
+
+if [[ $REBUILD -eq 1 ]]; then
+  remove_images
+  build_image
+elif [[ $BUILD_ONLY -eq 1 ]] || ! have_image; then
+  build_image
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+# Permission mode via settings, not --dangerously-skip-permissions: that flag is
+# refused when running as root. IS_SANDBOX=1 tells Claude it's already boxed in.
+# Also pre-accept the "do you trust this folder?" prompt for $PWD: the box only
+# ever sees the directory you launched it from, so the question is already
+# answered by running claude-box there.
+mkdir -p "$CL_BOX_HOME"
+CL_BOX_YOLO="${CL_BOX_YOLO:-1}" CL_BOX_TRUST="${CL_BOX_TRUST:-1}" \
+  python3 - "$CL_BOX_HOME" "$PWD" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+home, cwd = Path(sys.argv[1]), sys.argv[2]
+
+
+def edit(name, fn):
+    p = home / name
+    s = json.loads(p.read_text()) if p.is_file() else {}
+    before = json.dumps(s, sort_keys=True)
+    fn(s)
+    if json.dumps(s, sort_keys=True) != before:
+        p.write_text(json.dumps(s, indent=2) + "\n")
+
+
+mode = "bypassPermissions" if os.environ["CL_BOX_YOLO"] == "1" else "default"
+edit("settings.json", lambda s: s.setdefault("permissions", {}).update(defaultMode=mode))
+
+if os.environ["CL_BOX_TRUST"] == "1":
+    # .claude.json is Claude's own state file; touch just this one key.
+    edit(".claude.json", lambda s: s.setdefault("projects", {})
+         .setdefault(cwd, {}).update(hasTrustDialogAccepted=True))
+PYEOF
+
+DOCKER_ENV=()
+docker_bridge
+
+# The box never sees the host's ~/.gitconfig; pass the git identity (if the
+# host has one) so the agent's commits are authored by you.
+GIT_ENV=()
+if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/dev/null) &&
+  [[ -n $name && -n $email ]]; then
+  GIT_ENV=(--env "GIT_AUTHOR_NAME=$name" --env "GIT_AUTHOR_EMAIL=$email"
+    --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
+fi
+
+# Claude's mouse reporting swallows click-drag, so the terminal can no longer
+# select text. Off by default; the wheel still scrolls via the terminal itself.
+MOUSE_ENV=()
+[[ "${CL_BOX_MOUSE:-0}" == "1" ]] || MOUSE_ENV=(--env CLAUDE_CODE_DISABLE_MOUSE=1)
+
+# The project is mounted at its Mac path, not /work, so bind-mount paths the
+# agent hands to docker (-v $(pwd):/app) mean the same thing to the Mac's
+# daemon. Also keeps Claude's per-project history separate.
+# not exec: the trap above must outlive claude to stop socat
+container run -it --rm \
+  --name "cl-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$" \
+  --volume "$PWD:$PWD" \
+  --workdir "$PWD" \
+  --volume "$CL_BOX_HOME:/root/.claude-box" \
+  --tmpfs /tmp \
+  --cpus "${CL_BOX_CPUS:-4}" --memory "${CL_BOX_MEMORY:-4G}" \
+  --env ANTHROPIC_API_KEY \
+  --env ANTHROPIC_AUTH_TOKEN \
+  --env ANTHROPIC_BASE_URL \
+  --env ANTHROPIC_MODEL \
+  --env IS_SANDBOX=1 \
+  ${MOUSE_ENV[@]+"${MOUSE_ENV[@]}"} \
+  ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
+  ${GIT_ENV[@]+"${GIT_ENV[@]}"} \
+  ${CL_BOX_SSH:+--ssh} \
+  "$IMAGE" "$@"
