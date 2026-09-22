@@ -28,9 +28,18 @@
 #   CL_BOX_TRUST        0 to keep the "do you trust this folder?" prompt (default
 #                       1: projects[$PWD].hasTrustDialogAccepted is pre-set in
 #                       the box's .claude.json)
-#   CL_BOX_MOUSE        1 to let Claude capture the mouse (wheel scroll, clickable
-#                       file paths). Default 0: mouse reporting stays off, so the
-#                       terminal's own click-drag selection/copy keeps working.
+#   CL_BOX_TUI          which renderer Claude uses. Default "default": the classic
+#                       main-screen renderer, so the transcript scrolls into the
+#                       terminal's own scrollback and stays there after the box
+#                       exits (like `pi`). "fullscreen" is Claude's alt-screen
+#                       renderer: flicker-free, but the session lives on the
+#                       alternate screen and leaves no history behind, so scrolling
+#                       back then needs CL_BOX_MOUSE.
+#   CL_BOX_MOUSE        mouse reporting. Default 0: off, so the terminal's own
+#                       click-drag selection/copy keeps working. "scroll": Claude
+#                       sees the wheel (scrolling its own transcript) but not
+#                       clicks, so selection still works. 1: full capture, wheel
+#                       plus clickable file paths.
 #   CL_BOX_CPUS / CL_BOX_MEMORY  VM sizing (default 4 / 4G)
 #   CL_BOX_SSH          1: forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
@@ -225,6 +234,7 @@ fi
 # answered by running claude-box there.
 mkdir -p "$CL_BOX_HOME"
 CL_BOX_YOLO="${CL_BOX_YOLO:-1}" CL_BOX_TRUST="${CL_BOX_TRUST:-1}" \
+  CL_BOX_TUI="${CL_BOX_TUI:-default}" \
   python3 - "$CL_BOX_HOME" "$PWD" <<'PYEOF'
 import json, os, sys
 from pathlib import Path
@@ -242,7 +252,16 @@ def edit(name, fn):
 
 
 mode = "bypassPermissions" if os.environ["CL_BOX_YOLO"] == "1" else "default"
-edit("settings.json", lambda s: s.setdefault("permissions", {}).update(defaultMode=mode))
+
+
+def settings(s):
+    s["permissions"] = {**s.get("permissions", {}), "defaultMode": mode}
+    # Pin the renderer: left unset, Claude may switch itself to the alt-screen
+    # one, and then the session leaves nothing in the terminal's scrollback.
+    s["tui"] = os.environ["CL_BOX_TUI"]
+
+
+edit("settings.json", settings)
 
 if os.environ["CL_BOX_TRUST"] == "1":
     # .claude.json is Claude's own state file; touch just this one key.
@@ -276,10 +295,15 @@ if [[ -n ${CL_BOX_SSH:-} ]]; then
   fi
 fi
 
-# Claude's mouse reporting swallows click-drag, so the terminal can no longer
-# select text. Off by default; the wheel still scrolls via the terminal itself.
+# Full mouse reporting swallows click-drag, so the terminal can no longer select
+# text. Off by default: with the main-screen renderer the wheel already scrolls
+# the terminal's own scrollback, so there is nothing to gain by capturing it.
 MOUSE_ENV=()
-[[ "${CL_BOX_MOUSE:-0}" == "1" ]] || MOUSE_ENV=(--env CLAUDE_CODE_DISABLE_MOUSE=1)
+case "${CL_BOX_MOUSE:-0}" in
+1) ;; # full capture: wheel + clickable paths
+scroll) MOUSE_ENV=(--env CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1) ;;
+*) MOUSE_ENV=(--env CLAUDE_CODE_DISABLE_MOUSE=1) ;;
+esac
 
 # The project is mounted at its Mac path, not /work, so bind-mount paths the
 # agent hands to docker (-v $(pwd):/app) mean the same thing to the Mac's
