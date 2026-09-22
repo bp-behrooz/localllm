@@ -10,12 +10,24 @@
 #   claude-box --build-only        (re)build the image and exit
 #   claude-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                 host's gh token along (same as CL_BOX_SSH=1)
+#   claude-box --clean             drop the box's runtimes and caches, keep its login
+#   claude-box --clean-all         delete CL_BOX_HOME entirely (asks first)
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
 # and agent-box-lib.bash sitting next to this script.
 #
 # First run: log in inside the box (`/login`, or set ANTHROPIC_API_KEY); the
 # credentials land in CL_BOX_HOME and are reused after that.
+#
+# CL_BOX_HOME is the box's entire /root, so anything the agent installs into the
+# home directory survives the container being thrown away: mise runtimes, gems,
+# ~/.npm, ~/.cargo, shell history. `mise use ruby@4.0.2 && bundle install` is a
+# one-off, not a per-launch cost. System packages (apt) are not covered — those
+# still belong in the image. --clean empties it again.
+#
+# Language runtimes come from mise: its shims are on PATH, so a project's own
+# mise.toml applies in the non-interactive shells the agent runs commands in.
+# See tools/README.md for the customization options.
 #
 # Env knobs:
 #   CL_BOX_VERSION      npm version/tag of @anthropic-ai/claude-code (default "latest")
@@ -58,6 +70,8 @@ BOX_ENV_PREFIX="CL_BOX"
 
 CL_VERSION="${CL_BOX_VERSION:-latest}"
 CL_BOX_HOME="${CL_BOX_HOME:-$HOME/.claude-box}"
+BOX_HOME="$CL_BOX_HOME"
+BOX_KEEP=(.claude)
 
 # ----------------------------------------------------------------- lib ------
 # agent-box-lib.bash sits next to this script. Symlinks are followed, so
@@ -79,6 +93,7 @@ source "$dir/agent-box-lib.bash"
 # ---------------------------------------------------------------- flags -----
 REBUILD=0
 BUILD_ONLY=0
+CLEAN=
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --rebuild)
@@ -87,6 +102,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --build-only)
     BUILD_ONLY=1
+    shift
+    ;;
+  --clean)
+    CLEAN=keep
+    shift
+    ;;
+  --clean-all)
+    CLEAN=all
     shift
     ;;
   --ssh)
@@ -110,8 +133,9 @@ box_dockerfile_agent() {
 RUN npm install -g @anthropic-ai/claude-code@${CL_VERSION} \\
  && npm cache clean --force
 
-# Keep everything Claude persists (creds, history, projects) under one mount
-ENV CLAUDE_CONFIG_DIR=/root/.claude-box
+# /root is the persisted mount, so Claude's own default location is already the
+# right one; set it explicitly so creds and history can't wander.
+ENV CLAUDE_CONFIG_DIR=/root/.claude
 
 ENTRYPOINT ["claude"]
 EOF
@@ -123,10 +147,10 @@ ensure_settings() {
   # Also pre-accept the "do you trust this folder?" prompt for $PWD: the box only
   # ever sees the directory you launched it from, so the question is already
   # answered by running claude-box there.
-  mkdir -p "$CL_BOX_HOME"
+  mkdir -p "$CL_BOX_HOME/.claude"
   CL_BOX_YOLO="${CL_BOX_YOLO:-1}" CL_BOX_TRUST="${CL_BOX_TRUST:-1}" \
     CL_BOX_TUI="${CL_BOX_TUI:-default}" \
-    python3 - "$CL_BOX_HOME" "$PWD" <<'PYEOF'
+    python3 - "$CL_BOX_HOME/.claude" "$PWD" <<'PYEOF'
 import json, os, sys
 from pathlib import Path
 
@@ -162,6 +186,11 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
+if [[ -n $CLEAN ]]; then
+  box_clean "$CLEAN"
+  exit 0
+fi
+
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "@anthropic-ai/claude-code@$CL_VERSION"
 
@@ -188,7 +217,6 @@ esac
 # not exec: the socat trap must outlive claude
 box_run_args
 container run "${BOX_RUN_ARGS[@]}" \
-  --volume "$CL_BOX_HOME:/root/.claude-box" \
   --env ANTHROPIC_API_KEY \
   --env ANTHROPIC_AUTH_TOKEN \
   --env ANTHROPIC_BASE_URL \

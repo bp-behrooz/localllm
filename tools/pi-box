@@ -8,6 +8,18 @@
 #   pi-box --sync-only         refresh the local model list and exit
 #   pi-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                              host's gh token along (same as PI_BOX_SSH=1)
+#   pi-box --clean             drop the box's runtimes and caches, keep its config
+#   pi-box --clean-all         delete PI_BOX_HOME entirely (asks first)
+#
+# PI_BOX_HOME is the box's entire /root, so anything the agent installs into the
+# home directory survives the container being thrown away: mise runtimes, gems,
+# ~/.npm, ~/.cargo, shell history. `mise use ruby@4.0.2 && bundle install` is a
+# one-off, not a per-launch cost. System packages (apt) are not covered — those
+# still belong in the image. --clean empties it again.
+#
+# Language runtimes come from mise: its shims are on PATH, so a project's own
+# mise.toml applies in the non-interactive shells the agent runs commands in.
+# See tools/README.md for the customization options.
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
 # and agent-box-lib.bash sitting next to this script.
@@ -42,6 +54,9 @@ BOX_ENV_PREFIX="PI_BOX"
 
 PI_VERSION="${PI_BOX_VERSION:-latest}"
 PI_BOX_HOME="${PI_BOX_HOME:-$HOME/.pi-box}"
+PI_AGENT_HOME="$PI_BOX_HOME/.pi/agent"   # pi reads it as /root/.pi/agent
+BOX_HOME="$PI_BOX_HOME"
+BOX_KEEP=(.pi)
 
 # ----------------------------------------------------------------- lib ------
 # agent-box-lib.bash sits next to this script. Symlinks are followed, so
@@ -65,6 +80,7 @@ REBUILD=0
 BUILD_ONLY=0
 SYNC=0
 SYNC_ONLY=0
+CLEAN=
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --rebuild)
@@ -81,6 +97,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --sync-only)
     SYNC_ONLY=1
+    shift
+    ;;
+  --clean)
+    CLEAN=keep
+    shift
+    ;;
+  --clean-all)
+    CLEAN=all
     shift
     ;;
   --ssh)
@@ -114,13 +138,13 @@ sync_models() {
   # hand-edited fields are kept. Seeds settings.json on first run.
   : "${PI_BOX_LOCAL_URL:?set PI_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
   : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
-  mkdir -p "$PI_BOX_HOME/agent/sessions"
+  mkdir -p "$PI_AGENT_HOME/sessions"
 
-  PI_BOX_HOME="$PI_BOX_HOME" PI_BOX_DEFAULT="${PI_BOX_DEFAULT:-}" python3 - <<'PYEOF'
+  PI_AGENT_HOME="$PI_AGENT_HOME" PI_BOX_DEFAULT="${PI_BOX_DEFAULT:-}" python3 - <<'PYEOF'
 import json, os, sys, urllib.request
 from pathlib import Path
 
-home = Path(os.environ["PI_BOX_HOME"]) / "agent"
+home = Path(os.environ["PI_AGENT_HOME"])
 base = os.environ["PI_BOX_LOCAL_URL"].rstrip("/")
 key  = os.environ["LOCAL_LLM_API_KEY"]
 root = base[:-3] if base.endswith("/v1") else base
@@ -175,12 +199,12 @@ ensure_settings() {
   # Runs every launch. Makes sure the pi-hide-providers extension is listed in
   # settings.json (pi installs it on start) and writes the hide rules from
   # PI_BOX_HIDE. Does not touch models.
-  mkdir -p "$PI_BOX_HOME/agent"
-  PI_BOX_HOME="$PI_BOX_HOME" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" python3 - <<'PYEOF'
+  mkdir -p "$PI_AGENT_HOME"
+  PI_AGENT_HOME="$PI_AGENT_HOME" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" python3 - <<'PYEOF'
 import json, os
 from pathlib import Path
 
-home = Path(os.environ["PI_BOX_HOME"]) / "agent"
+home = Path(os.environ["PI_AGENT_HOME"])
 
 spath = home / "settings.json"
 settings = json.loads(spath.read_text()) if spath.is_file() else {}
@@ -199,6 +223,11 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
+if [[ -n $CLEAN ]]; then
+  box_clean "$CLEAN"
+  exit 0
+fi
+
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_models
   exit 0
@@ -211,7 +240,7 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi
 
-if [[ $SYNC -eq 1 || ! -f "$PI_BOX_HOME/agent/models.json" ]]; then
+if [[ $SYNC -eq 1 || ! -f "$PI_AGENT_HOME/models.json" ]]; then
   sync_models
 fi
 ensure_settings
@@ -223,7 +252,6 @@ box_docker_bridge
 # not exec: the socat trap must outlive pi
 box_run_args
 container run "${BOX_RUN_ARGS[@]}" \
-  --volume "$PI_BOX_HOME:/root/.pi" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   --env PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION \

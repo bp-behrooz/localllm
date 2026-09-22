@@ -9,6 +9,18 @@
 #   opencode-box --sync-only         refresh the local model list and exit
 #   opencode-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                    host's gh token along (same as OC_BOX_SSH=1)
+#   opencode-box --clean             drop the box's runtimes and caches, keep its config
+#   opencode-box --clean-all         delete OC_BOX_HOME entirely (asks first)
+#
+# OC_BOX_HOME is the box's entire /root, so anything the agent installs into the
+# home directory survives the container being thrown away: mise runtimes, gems,
+# ~/.npm, ~/.cargo, shell history. `mise use ruby@4.0.2 && bundle install` is a
+# one-off, not a per-launch cost. System packages (apt) are not covered — those
+# still belong in the image. --clean empties it again.
+#
+# Language runtimes come from mise: its shims are on PATH, so a project's own
+# mise.toml applies in the non-interactive shells the agent runs commands in.
+# See tools/README.md for the customization options.
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
 # and agent-box-lib.bash sitting next to this script.
@@ -41,6 +53,8 @@ BOX_ENV_PREFIX="OC_BOX"
 OC_VERSION="${OC_BOX_VERSION:-latest}"
 OC_BOX_HOME="${OC_BOX_HOME:-$HOME/.opencode-box}"
 PROVIDER="localllm"
+BOX_HOME="$OC_BOX_HOME"
+BOX_KEEP=(.config/opencode .local/share/opencode)
 
 # ----------------------------------------------------------------- lib ------
 # agent-box-lib.bash sits next to this script. Symlinks are followed, so
@@ -64,6 +78,7 @@ REBUILD=0
 BUILD_ONLY=0
 SYNC=0
 SYNC_ONLY=0
+CLEAN=
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --rebuild)
@@ -80,6 +95,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --sync-only)
     SYNC_ONLY=1
+    shift
+    ;;
+  --clean)
+    CLEAN=keep
+    shift
+    ;;
+  --clean-all)
+    CLEAN=all
     shift
     ;;
   --ssh)
@@ -103,17 +126,14 @@ box_dockerfile_agent() {
 RUN npm install -g opencode-ai@${OC_VERSION} \\
  && npm cache clean --force
 
-# Everything OpenCode persists goes under one mount point
-ENV XDG_CONFIG_HOME=/root/.opencode-box/config \\
-    XDG_DATA_HOME=/root/.opencode-box/data \\
-    XDG_STATE_HOME=/root/.opencode-box/state \\
-    XDG_CACHE_HOME=/root/.opencode-box/cache
+# No XDG overrides needed: /root as a whole is the persisted mount, so the
+# defaults (~/.config/opencode, ~/.local/share/opencode) already land in it.
 
 ENTRYPOINT ["opencode"]
 EOF
 }
 
-config_path() { echo "$OC_BOX_HOME/config/opencode/opencode.json"; }
+config_path() { echo "$OC_BOX_HOME/.config/opencode/opencode.json"; }
 
 sync_models() {
   # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
@@ -199,6 +219,11 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
+if [[ -n $CLEAN ]]; then
+  box_clean "$CLEAN"
+  exit 0
+fi
+
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_models
   exit 0
@@ -221,7 +246,6 @@ box_docker_bridge
 # not exec: the socat trap must outlive opencode
 box_run_args
 container run "${BOX_RUN_ARGS[@]}" \
-  --volume "$OC_BOX_HOME:/root/.opencode-box" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   "$BOX_IMAGE" "$@"

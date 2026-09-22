@@ -11,6 +11,9 @@
 #   BOX_IMAGE        image tag to build and run       (e.g. "claude-box")
 #   BOX_NAME_PREFIX  prefix for container names       (e.g. "cl")
 #   BOX_ENV_PREFIX   its user-facing env-knob prefix  (e.g. "CL_BOX")
+#   BOX_HOME         host dir mounted as the box's /root
+#   BOX_KEEP         paths under BOX_HOME that `--clean` preserves, relative
+#                    (e.g. (.claude) — the logins and settings, not the runtimes)
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
@@ -95,6 +98,16 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
+# mise manages the language runtimes (ruby, go, python, ...) a project asks for.
+# It goes in /usr/local so the binary survives a --clean; what it installs lands
+# in /root/.local/share/mise, which is the persisted home.
+RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+
+# Shims, not `mise activate`: activation hooks an interactive shell's prompt,
+# and an agent runs every command through a non-interactive `bash -c`, where it
+# would silently do nothing. The shim dir works for both.
+ENV PATH=/root/.local/share/mise/shims:$PATH
+
 EOF
 }
 
@@ -126,6 +139,48 @@ box_ensure_image() {
   elif [[ $build_only -eq 1 ]] || ! box_have_image; then
     box_build_image "$note"
   fi
+}
+
+# ----------------------------------------------------------------- clean -----
+# box_clean keep   drop everything in BOX_HOME except BOX_KEEP (runtimes, caches
+#                  and package downloads go; the box stays logged in)
+# box_clean all    delete BOX_HOME outright, after asking
+box_clean() {
+  local mode="$1" home="$BOX_HOME" tmp rel reply
+  [[ -n $home && $home != "/" && $home != "$HOME" ]] || {
+    echo "error: refusing to clean '$home'" >&2
+    exit 1
+  }
+  [[ -d $home ]] || {
+    echo "==> $home does not exist; nothing to clean" >&2
+    return 0
+  }
+  echo "==> $home is $(du -sh "$home" 2>/dev/null | cut -f1)" >&2
+
+  if [[ $mode == all ]]; then
+    printf 'Delete it all, including this box'"'"'s logins? [y/N] ' >&2
+    read -r reply </dev/tty || reply=""
+    [[ $reply == [yY]* ]] || {
+      echo "==> cancelled" >&2
+      return 0
+    }
+    rm -rf "${home:?}"
+    echo "==> removed $home" >&2
+    return 0
+  fi
+
+  # Move what we keep aside, drop the rest, move it back. Handles nested keeps
+  # (.local/share/opencode) without having to walk around them, and the temp dir
+  # is a sibling so the moves stay on one filesystem.
+  tmp="$(mktemp -d "${home%/}.clean.XXXXXX")"
+  for rel in ${BOX_KEEP[@]+"${BOX_KEEP[@]}"}; do
+    [[ -e "$home/$rel" ]] || continue
+    mkdir -p "$tmp/$(dirname "$rel")"
+    mv "$home/$rel" "$tmp/$rel"
+  done
+  rm -rf "${home:?}"
+  mv "$tmp" "$home"
+  echo "==> cleaned $home, now $(du -sh "$home" 2>/dev/null | cut -f1); kept ${BOX_KEEP[*]}" >&2
 }
 
 # ------------------------------------------------------------ host alias -----
@@ -237,21 +292,27 @@ _box_gh_env() {
 
 # Fills BOX_RUN_ARGS with the flags every box passes: the project mounted at its
 # own Mac path (so bind-mount paths the agent hands to docker mean the same
-# thing to the Mac's daemon), VM sizing, the docker bridge, git identity, gh
-# token and the ssh-agent. Call box_docker_bridge first. The per-agent mounts
-# and --env flags stay in the calling script.
+# thing to the Mac's daemon), BOX_HOME as the box's whole /root, VM sizing, the
+# docker bridge, git identity, gh token and the ssh-agent. Call
+# box_docker_bridge first. The per-agent --env flags stay in the calling script.
 box_run_args() {
   _box_git_env
   _box_gh_env
 
+  mkdir -p "$BOX_HOME"
   BOX_RUN_ARGS=(
     -it --rm
     --name "$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$"
     --volume "$PWD:$PWD"
     --workdir "$PWD"
+    --volume "$BOX_HOME:/root"
     --tmpfs /tmp
     --cpus "$(box_knob CPUS 4)"
     --memory "$(box_knob MEMORY 4G)"
+    # mise refuses to read a project's mise.toml until it's trusted, and would
+    # sit on a prompt no agent can answer. The box only ever sees $PWD.
+    --env "MISE_TRUSTED_CONFIG_PATHS=$PWD"
+    --env MISE_YES=1
   )
   BOX_RUN_ARGS+=(
     ${BOX_DOCKER_ENV[@]+"${BOX_DOCKER_ENV[@]}"}
