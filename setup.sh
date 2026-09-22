@@ -13,6 +13,9 @@ GPUS=(0 1)
 # name -> "gpus|model|extra llama-server args"
 #   gpus: how many GPUs the model needs. 1 = pool places it on whichever is
 #   free; 2 = spans both (pool evicts everything else first)
+# Custom engine form: "gpus|cmd|<command>". The pool runs the command via
+# bash -c with PORT, GPUS and NAME in the environment; it must serve /health
+# and /v1 on PORT. `download`/`remove` don't manage cmd presets.
 declare -A PRESET=(
   [thinkingcap]="1|bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF:Q4_K_M|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20"
   [qwen3.8]="1|unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
@@ -22,7 +25,11 @@ declare -A PRESET=(
   [gpt-oss-20b]="1|ggml-org/gpt-oss-20b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
   [muse-glimmer]="1|unsloth/Muse-Glimmer-30B-GGUF:UD-Q4_K_XL|-c 131072 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64"
   [gpt-oss-120b]="2|ggml-org/gpt-oss-120b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
+  [qwen3.8-radiance]="2|cmd|SERVED_NAMES=qwen3.8-radiance MAXLEN=262144 /opt/localllm/radiance/serve-mxfp4.sh"
 )
+
+# preloaded by the pool at startup (space-separated preset names)
+PRELOAD="qwen3.8-radiance"
 
 usage() {
   echo "usage: $0                     apply config (all presets served on demand)"
@@ -34,6 +41,7 @@ usage() {
 
 hf_fetch() { # <preset>
   IFS='|' read -r _ m _ <<<"${PRESET[$1]}"
+  [[ "$m" == cmd ]] && { echo "skipping $1: custom engine manages its own files"; return 0; }
   local repo="${m%%:*}" tag="${m#*:}" inc=()
   # multimodal repos keep the vision tower in a separate mmproj gguf the tag filter would miss
   [[ "$tag" != "$m" ]] && inc=(--include "*${tag}*" --include "*mmproj*")
@@ -55,6 +63,7 @@ download)
 remove)
   [[ $# -eq 2 && -n "${PRESET[$2]:-}" ]] || usage
   IFS='|' read -r _ m _ <<<"${PRESET[$2]}"
+  [[ "$m" == cmd ]] && { echo "$2 is a custom engine; remove its files where it keeps them"; exit 1; }
   repo="${m%%:*}" tag="${m#*:}"
   dir="/opt/localllm/.cache/huggingface/hub/models--${repo//\//--}"
   if [[ "$tag" == "$m" ]]; then
@@ -79,6 +88,9 @@ LLAMA_BIN="$(command -v llama-server)"
 # ---------- one-time provisioning (idempotent, skipped when done) ----------
 id localllm &>/dev/null || useradd -r -m -d /opt/localllm -s "$(command -v nologin)" localllm
 usermod -aG render,video localllm
+# cmd presets that launch containers need the runtime; docker group is root-equivalent,
+# but this user already owns the GPUs and everything under /opt/localllm
+getent group docker >/dev/null && usermod -aG docker localllm
 [[ -x /opt/localllm/venv/bin/uvicorn ]] || {
   [[ -d /opt/localllm/venv ]] || python3 -m venv /opt/localllm/venv
   /opt/localllm/venv/bin/pip install -q --upgrade pip fastapi uvicorn httpx
@@ -97,13 +109,19 @@ chmod 600 /opt/localllm/env
   echo '{'
   echo "  \"llama_bin\": \"${LLAMA_BIN}\","
   echo "  \"gpus\": [$(IFS=,; echo "${GPUS[*]}")],"
+  printf '  "preload": [%s],\n' \
+    "$(sep=""; for p in $PRELOAD; do printf '%s"%s"' "$sep" "$p"; sep=", "; done)"
   echo '  "presets": {'
   sep=""
   for name in "${!PRESET[@]}"; do
     IFS='|' read -r ngpus model args <<<"${PRESET[$name]}"
     [[ "$ngpus" =~ ^[12]$ ]] || { echo "preset $name: bad gpu count '$ngpus'"; exit 1; }
-    printf '%s    "%s": {"hf": "%s", "gpus": %d, "args": "%s"}' \
-      "$sep" "$name" "$model" "$ngpus" "$args"
+    if [[ "$model" == cmd ]]; then
+      printf '%s    "%s": {"cmd": "%s", "gpus": %d}' "$sep" "$name" "$args" "$ngpus"
+    else
+      printf '%s    "%s": {"hf": "%s", "gpus": %d, "args": "%s"}' \
+        "$sep" "$name" "$model" "$ngpus" "$args"
+    fi
     sep=$',\n'
   done
   printf '\n  }\n}\n'

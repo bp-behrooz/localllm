@@ -54,6 +54,18 @@ Models are defined in the `PRESET` table at the top of `setup.sh`:
 - `-c` (context size) is also published through the server's `/model/info` so
   clients can discover each model's window.
 
+Two extras:
+
+- **Custom engines**: `[name]="gpus|cmd|<command>"` runs an arbitrary serving
+  command instead of `llama-server`. The pool executes it via `bash -c` with
+  `PORT`, `GPUS` (HIP indices) and `NAME` (a unique instance name) in the
+  environment; it must serve `/health` and OpenAI-style `/v1` on `PORT`, under
+  the preset's name. `download`/`remove` don't manage these. Advertise the
+  context window with a `MAXLEN=<n>` in the command so `/model/info` picks it up.
+- **Preload**: preset names in `PRELOAD` (space-separated) are loaded when the
+  pool starts, so the default model answers without a cold start. Preloaded
+  models are still evictable like everything else.
+
 After editing presets, re-run `sudo ./setup.sh` to apply. Other subcommands:
 
 ```bash
@@ -108,6 +120,27 @@ example.com {
 
 Clients then use base URL `https://example.com/localllm/v1` with the master
 key as API key.
+
+## The qwen3.8-radiance preset
+
+The default preset serves Qwen3.8-27B in native MXFP4 through
+[radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)
+(vLLM with RDNA4 kernels + speculative decoding; ~6× llama.cpp's dense-model
+speed on the same cards). It's a `cmd` preset, so the radiance checkout is a
+one-time manual install — as the `localllm` user, under its home:
+
+```bash
+sudo git clone https://codeberg.org/ggz14/radiance-vllm-mxfp4 /opt/localllm/radiance
+sudo chown -R localllm:localllm /opt/localllm/radiance
+sudo -u localllm env HOME=/opt/localllm ASSUME_YES=1 /opt/localllm/radiance/setup-mxfp4.sh
+sudo ./setup.sh
+```
+
+`setup-mxfp4.sh` pulls the ~40 GiB image + checkpoints into `/opt/localllm`
+(the pool user is added to the `docker` group by `setup.sh`). Cold start is
+slower than a llama-server preset — engine init plus, on the very first run,
+kernel compilation. Delete the preset from the table (and `PRELOAD`) if you
+don't want any of this; nothing else depends on it.
 
 ## Agents (pi / OpenCode)
 

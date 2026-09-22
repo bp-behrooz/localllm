@@ -20,6 +20,8 @@ import subprocess
 import sys
 import time
 
+from contextlib import asynccontextmanager
+
 import httpx
 import uvicorn
 from fastapi import FastAPI
@@ -29,20 +31,28 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_HUB = os.path.join(HERE, ".cache/huggingface/hub")
-GPUS, PRESETS, LLAMA_BIN, MASTER_KEY = [], {}, "", ""
+GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD = [], {}, "", "", []
 READY_TIMEOUT = 3600  # first start of a preset may have to download the model
 IDLE_SCALE_EVICT = 600  # only sacrifice a model idle this long to duplicate a busy one
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(_app):
+    if PRELOAD:
+        asyncio.create_task(preload_all())
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 client = httpx.AsyncClient(timeout=None)
 lock = asyncio.Lock()
 instances = {}  # name -> [Instance]
 
 
 def load_config():
-    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY
+    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD
     cfg = json.load(open(os.path.join(HERE, "pool.json")))
     GPUS, PRESETS, LLAMA_BIN = cfg["gpus"], cfg["presets"], cfg["llama_bin"]
+    PRELOAD = cfg.get("preload", [])
     MASTER_KEY = os.environ["MASTER_KEY"]
 
 
@@ -61,10 +71,21 @@ class Instance:
         self.inflight = 0
         self.last_used = time.monotonic()
         preset = PRESETS[name]
-        env = dict(os.environ, HIP_VISIBLE_DEVICES=",".join(map(str, gpus)))
-        cmd = [LLAMA_BIN, "-hf", preset["hf"], "-fa", "on", "--jinja",
-               "--host", "127.0.0.1", "--port", str(self.port)]
-        cmd += shlex.split(preset["args"])
+        gpu_list = ",".join(map(str, gpus))
+        env = dict(os.environ, HIP_VISIBLE_DEVICES=gpu_list)
+        if "cmd" in preset:
+            # custom engine (e.g. radiance/vLLM): the command reads PORT / GPUS /
+            # NAME from the environment and must serve /health and /v1 on PORT.
+            # ponytail: stop() SIGTERMs the launcher (docker forwards it); a
+            # kill -9 fallback can orphan a container -- the fixed NAME lets the
+            # next spawn of the same preset docker-rm it.
+            env.update(PORT=str(self.port), GPUS=gpu_list,
+                       GPU_IDS=gpu_list, NAME=f"pool-{name}-{self.port}")
+            cmd = ["bash", "-c", preset["cmd"]]
+        else:
+            cmd = [LLAMA_BIN, "-hf", preset["hf"], "-fa", "on", "--jinja",
+                   "--host", "127.0.0.1", "--port", str(self.port)]
+            cmd += shlex.split(preset["args"])
         self.proc = subprocess.Popen(cmd, env=env)
         self.loader = asyncio.create_task(self._wait_ready())
 
@@ -139,6 +160,8 @@ def _evict_one(min_idle=0.0, exclude=None):
 def _downloaded(name):
     # ponytail: dir existence only — a half-downloaded repo still counts, in
     # which case the eager second instance may race the first one's download.
+    if "cmd" in PRESETS[name]:
+        return False  # custom engines never eager-pair; scale-out still works
     repo = PRESETS[name]["hf"].split(":")[0]
     return os.path.isdir(os.path.join(CACHE_HUB, "models--" + repo.replace("/", "--")))
 
@@ -185,21 +208,38 @@ async def health():
                        for n, lst in instances.items()}}
 
 
+def _ordered_presets():
+    """Preloaded presets first: clients that default to the first listed model
+    (the tools/ boxes do) then default to what the pool serves at startup."""
+    return [n for n in dict.fromkeys([*PRELOAD, *PRESETS]) if n in PRESETS]
+
+
 @app.get("/v1/models")
 async def models():
     return {"object": "list",
-            "data": [{"id": n, "object": "model", "owned_by": "pool"} for n in PRESETS]}
+            "data": [{"id": n, "object": "model", "owned_by": "pool"}
+                     for n in _ordered_presets()]}
 
 
 @app.get("/model/info")
 async def model_info():
     """Context sizes per preset (shape kept from the LiteLLM era for clients)."""
     data = []
-    for name, p in PRESETS.items():
-        ctx = re.search(r"-c (\d+)", p["args"])
+    for name in _ordered_presets():
+        p = PRESETS[name]
+        # llama-server presets carry `-c N`; cmd presets may carry MAXLEN=N
+        ctx = re.search(r"(?:-c |MAXLEN=)(\d+)", p.get("args") or p.get("cmd", ""))
         data.append({"model_name": name,
                      "model_info": {"max_input_tokens": int(ctx.group(1))} if ctx else {}})
     return {"data": data}
+
+
+async def preload_all():
+    for name in PRELOAD:
+        try:
+            await acquire(name)
+        except Exception as e:
+            print(f"[pool] preload {name} failed: {e}", file=sys.stderr)
 
 
 @app.post("/v1/{path:path}")
@@ -254,9 +294,11 @@ def selftest():
     MASTER_KEY = "sk-test"
     PRESETS = {"a": {"hf": "org/a-GGUF:Q4", "gpus": 1, "args": "-c 4096"},
                "b": {"hf": "org/b-GGUF:Q4", "gpus": 1, "args": ""},
-               "big": {"hf": "org/big-GGUF", "gpus": 2, "args": ""}}
+               "big": {"hf": "org/big-GGUF", "gpus": 2, "args": ""},
+               "rad": {"cmd": "MAXLEN=1234 ./fake-serve.sh", "gpus": 2}}
     for p in PRESETS.values():
-        os.makedirs(os.path.join(work, "models--" + p["hf"].split(":")[0].replace("/", "--")))
+        if "hf" in p:
+            os.makedirs(os.path.join(work, "models--" + p["hf"].split(":")[0].replace("/", "--")))
 
     class FakeProc:
         returncode = None
@@ -264,7 +306,11 @@ def selftest():
         def terminate(self): pass
         def wait(self, *a): pass
 
-    subprocess.Popen = lambda *a, **kw: FakeProc()
+    spawned = []
+    def fake_popen(cmd, env=None, **kw):
+        spawned.append((cmd, env or {}))
+        return FakeProc()
+    subprocess.Popen = fake_popen
     async def instantly_ready(self): pass
     Instance._wait_ready = instantly_ready
 
@@ -314,7 +360,21 @@ def selftest():
         assert "big" not in instances
         Instance._wait_ready = instantly_ready
 
-        # 8. HTTP layer: auth, model info, unknown model, busy pool,
+        # 8. cmd preset: spawned via bash -c with PORT/GPUS/NAME in the env,
+        #    scheduled like any other instance
+        rad = await acquire("rad")
+        cmd, env = spawned[-1]
+        assert cmd[:2] == ["bash", "-c"] and "fake-serve" in cmd[2]
+        assert env["PORT"] == str(rad.port) and env["GPUS"] == "70,71"
+        assert env["NAME"] == f"pool-rad-{rad.port}"
+
+        # 9. preload: the configured default loads at startup
+        global PRELOAD
+        PRELOAD = ["a"]
+        await preload_all()
+        assert "a" in instances
+
+        # 10. HTTP layer: auth, model info, unknown model, busy pool,
         #    upstream down + bookkeeping
         api = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                 base_url="http://t",
@@ -326,10 +386,13 @@ def selftest():
         r = await anon.get("/health")
         assert r.status_code == 200, r.status_code  # health stays open
         r = await api.get("/v1/models")
-        assert {m["id"] for m in r.json()["data"]} == set(PRESETS)
+        listed = [m["id"] for m in r.json()["data"]]
+        assert set(listed) == set(PRESETS)
+        assert listed[0] == "a"  # PRELOAD=["a"] since scenario 9: preload lists first
         r = await api.get("/model/info")
         info = {m["model_name"]: m["model_info"] for m in r.json()["data"]}
         assert info["a"] == {"max_input_tokens": 4096} and info["b"] == {}
+        assert info["rad"] == {"max_input_tokens": 1234}
         r = await api.post("/v1/chat/completions", json={"model": "nope"})
         assert r.status_code == 404, r.status_code
         a = await acquire("a")
