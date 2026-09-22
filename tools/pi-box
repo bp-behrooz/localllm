@@ -9,7 +9,8 @@
 #   pi-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                              host's gh token along (same as PI_BOX_SSH=1)
 #
-# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container).
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
+# and agent-box-lib.bash sitting next to this script.
 #
 # Env knobs:
 #   PI_BOX_VERSION      npm version/tag of pi (default "latest")
@@ -35,9 +36,29 @@
 #   PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION  passed through for pi-anthropic-oauth
 set -euo pipefail
 
-IMAGE="pi-box"
+BOX_IMAGE="pi-box"
+BOX_NAME_PREFIX="pi"
+BOX_ENV_PREFIX="PI_BOX"
+
 PI_VERSION="${PI_BOX_VERSION:-latest}"
 PI_BOX_HOME="${PI_BOX_HOME:-$HOME/.pi-box}"
+
+# ----------------------------------------------------------------- lib ------
+# agent-box-lib.bash sits next to this script. Symlinks are followed, so
+# `ln -s .../tools/pi-box ~/bin/pi-box` still finds it.
+self="${BASH_SOURCE[0]}"
+while [[ -L $self ]]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ $self == /* ]] || self="$dir/$self"
+done
+dir="$(cd -P "$(dirname "$self")" && pwd)"
+[[ -r "$dir/agent-box-lib.bash" ]] || {
+  echo "error: agent-box-lib.bash not found next to $dir/$(basename "$self")" >&2
+  exit 1
+}
+# shellcheck source=agent-box-lib.bash
+source "$dir/agent-box-lib.bash"
 
 # ---------------------------------------------------------------- flags -----
 REBUILD=0
@@ -63,6 +84,9 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --ssh)
+    # Not dead: the lib reads it back as `box_knob SSH`, i.e. indirectly
+    # through BOX_ENV_PREFIX, which shellcheck can't follow.
+    # shellcheck disable=SC2034
     PI_BOX_SSH=1
     shift
     ;;
@@ -75,60 +99,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ------------------------------------------------------------- helpers ------
-have_image() {
-  container image inspect "$IMAGE" >/dev/null 2>&1
-}
-
-remove_images() {
-  local ids
-  ids=$(container list --all --format json 2>/dev/null |
-    grep -o '"name":"pi-[^"]*"' | cut -d'"' -f4 || true)
-  for c in $ids; do
-    container delete --force "$c" >/dev/null 2>&1 || true
-  done
-  if have_image; then
-    echo "==> removing image $IMAGE" >&2
-    container image delete "$IMAGE" >/dev/null
-  fi
-  container image prune >/dev/null 2>&1 || true
-}
-
-build_image() {
-  local ctx
-  ctx=$(mktemp -d)
-  trap 'rm -rf "$ctx"' RETURN
-
-  cat >"$ctx/Dockerfile" <<EOF
-FROM ubuntu:26.04
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Node 22 ships in 26.04's repos, so no NodeSource needed
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends \\
-      ca-certificates curl git ripgrep fd-find jq make openssh-client \\
-      python3 unzip less nodejs npm \\
-      docker.io docker-compose-v2 docker-buildx \\
- && ln -s /usr/bin/fdfind /usr/local/bin/fd \\
- && rm -rf /var/lib/apt/lists/*
-
-# GitHub CLI: Ubuntu's own package lags years behind, so use GitHub's repo
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \\
- && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \\
- && echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
-      > /etc/apt/sources.list.d/github-cli.list \\
- && apt-get update \\
- && apt-get install -y --no-install-recommends gh \\
- && rm -rf /var/lib/apt/lists/*
-
+box_dockerfile_agent() {
+  cat <<EOF
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \\
  && npm cache clean --force
 
 ENTRYPOINT ["pi"]
 EOF
-
-  echo "==> building image $IMAGE (pi@$PI_VERSION)" >&2
-  container build --tag "$IMAGE" "$ctx"
 }
 
 sync_models() {
@@ -221,98 +198,14 @@ elif hpath.is_file():
 PYEOF
 }
 
-ensure_host_alias() {
-  # Apple's localhost domain installs a pf rule that does not survive a reboot,
-  # while `dns list` keeps showing the domain. So: redo the setup (needs sudo)
-  # once per boot, tracked by kernel boot time.
-  local alias="$1" ip="${PI_BOX_HOST_ALIAS_IP:-203.0.113.113}"
-  # Shared between pi-box and opencode-box so only one of them does this per boot.
-  local stamp="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot" boot
-  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
-  if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] &&
-    container system dns list 2>/dev/null | grep -q "^$alias\b"; then
-    return 0
-  fi
-
-  echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
-  sudo container system dns delete "$alias" >/dev/null 2>&1 || true
-  sudo container system dns create "$alias" --localhost "$ip"
-
-  # The runtime needs a restart to pick up the change. Don't yank it out from
-  # under running containers (ours or anyone else's).
-  if [[ -n "$(container list --quiet 2>/dev/null)" ]]; then
-    echo "error: containers are running, so the runtime can't be restarted to pick up the change." >&2
-    echo "       When they're done:  container system stop && container system start" >&2
-    echo "       then relaunch." >&2
-    exit 1
-  else
-    container system stop >/dev/null 2>&1 || true
-    container system start
-  fi
-  mkdir -p "$(dirname "$stamp")"
-  printf '%s' "$boot" >"$stamp"
-}
-
-docker_bridge() {
-  # Expose the Mac's Docker socket to the box. Unix sockets can't be bind-mounted
-  # into the VM, and containers can't reach the Mac at the bridge gateway IP by
-  # default. Apple's supported route is a "localhost" DNS domain: it installs a
-  # pf rule that redirects a chosen IP to the Mac's loopback, so we listen on
-  # 127.0.0.1 with socat and let the box connect by name.
-  [[ "${PI_BOX_DOCKER:-0}" == "1" ]] || return 0
-  command -v socat >/dev/null || {
-    echo "error: PI_BOX_DOCKER needs socat (brew install socat)" >&2
-    exit 1
-  }
-
-  local alias="${PI_BOX_HOST_ALIAS:-host.container.internal}"
-  ensure_host_alias "$alias"
-
-  local sock="${PI_BOX_DOCKER_SOCK:-}"
-  if [[ -z "$sock" ]]; then
-    for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
-      "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
-      [[ -S "$c" ]] && {
-        sock="$c"
-        break
-      }
-    done
-  fi
-  [[ -S "${sock:-}" ]] || {
-    echo "error: no Docker socket found; set PI_BOX_DOCKER_SOCK" >&2
-    exit 1
-  }
-
-  DOCKER_PORT=$((20000 + RANDOM % 20000))
-  socat "TCP-LISTEN:$DOCKER_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
-  SOCAT_PID=$!
-  trap 'kill "$SOCAT_PID" 2>/dev/null' EXIT
-  DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$DOCKER_PORT")
-  echo "==> docker: $sock -> tcp://$alias:$DOCKER_PORT (this session only)" >&2
-}
-
 # ---------------------------------------------------------------- main ------
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_models
   exit 0
 fi
 
-if ! command -v container >/dev/null 2>&1; then
-  echo "error: 'container' CLI not found. Install with: brew install container" >&2
-  exit 1
-fi
-
-if ! container system status >/dev/null 2>&1; then
-  echo "==> starting container runtime" >&2
-  container system start
-fi
-
-if [[ $REBUILD -eq 1 ]]; then
-  remove_images
-  build_image
-elif [[ $BUILD_ONLY -eq 1 ]] || ! have_image; then
-  build_image
-fi
+box_require_runtime
+box_ensure_image "$REBUILD" "$BUILD_ONLY" "pi@$PI_VERSION"
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
@@ -323,48 +216,15 @@ if [[ $SYNC -eq 1 || ! -f "$PI_BOX_HOME/agent/models.json" ]]; then
 fi
 ensure_settings
 
-DOCKER_ENV=()
-docker_bridge
+box_docker_bridge
 
-# The box never sees the host's ~/.gitconfig; pass the git identity (if the
-# host has one) so the agent's commits are authored by you.
-GIT_ENV=()
-if name=$(git config user.name 2>/dev/null) && email=$(git config user.email 2>/dev/null) &&
-  [[ -n $name && -n $email ]]; then
-  GIT_ENV=(--env "GIT_AUTHOR_NAME=$name" --env "GIT_AUTHOR_EMAIL=$email"
-    --env "GIT_COMMITTER_NAME=$name" --env "GIT_COMMITTER_EMAIL=$email")
-fi
-
-# The agent socket authenticates git over ssh, but GitHub's API only takes a
-# token, so `gh pr view`/`gh api` stay locked out. Hand the box the host's gh
-# token alongside the agent. Exported rather than passed by value: `--env NAME`
-# inherits it, keeping the token out of the host's process list.
-GH_ENV=()
-if [[ -n ${PI_BOX_SSH:-} ]]; then
-  if GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n $GH_TOKEN ]]; then
-    export GH_TOKEN
-    GH_ENV=(--env GH_TOKEN)
-  else
-    echo "==> --ssh: no gh token on the host (run \`gh auth login\`); gh stays logged out in the box" >&2
-  fi
-fi
-
-# The project is mounted at its Mac path, not /work, so bind-mount paths the
-# agent hands to docker (-v $(pwd):/app, compose ./data:...) mean the same
-# thing to the Mac's daemon. Also keeps pi's per-project sessions separate.
-# not exec: the trap above must outlive pi to stop socat
-container run -it --rm \
-  --name "pi-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$" \
-  --volume "$PWD:$PWD" \
-  --workdir "$PWD" \
+# pi keeps its per-project sessions keyed by path, and the project is mounted at
+# its Mac path, so they stay separate per project.
+# not exec: the socat trap must outlive pi
+box_run_args
+container run "${BOX_RUN_ARGS[@]}" \
   --volume "$PI_BOX_HOME:/root/.pi" \
-  --tmpfs /tmp \
-  --cpus "${PI_BOX_CPUS:-4}" --memory "${PI_BOX_MEMORY:-4G}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   --env PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION \
-  ${DOCKER_ENV[@]+"${DOCKER_ENV[@]}"} \
-  ${GIT_ENV[@]+"${GIT_ENV[@]}"} \
-  ${GH_ENV[@]+"${GH_ENV[@]}"} \
-  ${PI_BOX_SSH:+--ssh} \
-  "$IMAGE" "$@"
+  "$BOX_IMAGE" "$@"
