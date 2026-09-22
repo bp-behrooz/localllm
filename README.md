@@ -15,8 +15,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool.py` | the server: bearer-key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
-| `tools/pi-box`, `tools/opencode-box` | run the pi / OpenCode agent in a sandboxed VM (Apple `container`); sync the served models on launch |
-| `tools/claude-box` | same sandbox for Claude Code; unrelated to this server, it talks to Anthropic as usual |
+| [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
 
 ## Requirements
 
@@ -123,7 +122,7 @@ key as API key.
 
 ## The qwen3.8-radiance preset
 
-The default preset serves Qwen3.8-27B in native MXFP4 through
+The preloaded preset serves Qwen3.8-27B in native MXFP4 through
 [radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)
 (vLLM with RDNA4 kernels + speculative decoding; ~6× llama.cpp's dense-model
 speed on the same cards). It's a `cmd` preset, so the radiance checkout is a
@@ -156,8 +155,10 @@ export LOCAL_LLM_API_KEY=sk-xxx
 
 On first launch (or with `--sync`) they query the server and write the served
 models, with context limits, into the box's own config under `~/.pi-box` /
-`~/.opencode-box` — re-run with `--sync` after preset changes. See each
-script's header for the full list of knobs.
+`~/.opencode-box` — re-run with `--sync` after preset changes.
+
+[`tools/README.md`](tools/README.md) covers the rest: what persists between
+runs, how to customize a box and how to clean it out again.
 
 ## License
 
