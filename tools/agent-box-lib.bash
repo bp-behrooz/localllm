@@ -82,7 +82,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Node 22 ships in 26.04's repos, so no NodeSource needed
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git ripgrep fd-find jq make openssh-client \
+      build-essential ca-certificates curl git ripgrep fd-find jq openssh-client \
       python3 unzip less nodejs npm \
       docker.io docker-compose-v2 docker-buildx \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
