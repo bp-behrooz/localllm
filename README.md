@@ -14,7 +14,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 | File | Role |
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
-| `pool.py` | the server: bearer-key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
+| `pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
 | [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
 
 ## Requirements
@@ -34,7 +34,9 @@ HF_TOKEN=hf_xxx ./setup.sh    # token is stored in /opt/localllm/env; only neede
 ```
 
 The final output prints the API key (`MASTER_KEY`) clients must send as a
-Bearer token. `systemctl start|stop localllm` controls the whole stack.
+Bearer token (`Authorization: Bearer sk-xxx`), or, for clients that can only
+send a bare key in a header of their choosing, as `x-litellm-api-key: sk-xxx`.
+`systemctl start|stop localllm` controls the whole stack.
 
 ## Presets
 
@@ -98,15 +100,15 @@ Self-test (no GPUs needed): `python3 pool.py --test`
 
 The server listens on `0.0.0.0:4000` (open the port for your LAN, e.g.
 `ufw allow from 192.168.2.0/24 to any port 4000 proto tcp`). To reach it from
-outside, let a Caddy that can reach the box terminate TLS. Auth is the Bearer
-key enforced by the server itself, so Caddy just proxies — allowlisting the
+outside, let a Caddy that can reach the box terminate TLS. Auth is the key
+enforced by the server itself, so Caddy just proxies — allowlisting the
 API paths keeps everything else (like the unauthenticated `/health`) off the
 internet:
 
 ```caddyfile
 example.com {
     handle_path /localllm/* {
-        @api path /v1/* /model/info
+        @api path /v1/* /model/info /model_group/info
         handle @api {
             reverse_proxy gpu-box:4000
         }

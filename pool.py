@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GPU pool server for llama-server.
 
-The whole front end: an OpenAI-compatible, bearer-key-authenticated server on
+The whole front end: an OpenAI-compatible, key-authenticated server on
 0.0.0.0:4000. Requesting a model loads it on a free GPU (or both, for presets
 that need them), LRU-evicting idle instances when no GPU is free. A
 single-GPU model can run as two load-balanced instances: both are started up
@@ -56,10 +56,16 @@ def load_config():
     MASTER_KEY = os.environ["MASTER_KEY"]
 
 
+def authorized(headers):
+    # Bearer is the normal OpenAI form; x-litellm-api-key carries a bare key,
+    # for clients that can only send the key in a header of their choosing.
+    return headers.get("authorization") == f"Bearer {MASTER_KEY}" \
+        or headers.get("x-litellm-api-key") == MASTER_KEY
+
+
 @app.middleware("http")
 async def auth(request, call_next):
-    if request.url.path != "/health" \
-            and request.headers.get("authorization") != f"Bearer {MASTER_KEY}":
+    if request.url.path != "/health" and not authorized(request.headers):
         return JSONResponse({"error": "invalid api key"}, status_code=401)
     return await call_next(request)
 
@@ -234,6 +240,27 @@ async def model_info():
     return {"data": data}
 
 
+DEFAULT_CTX = 32768
+@app.get("/model_group/info")
+async def model_group_info():
+    """LiteLLM-shaped model metadata, as qm's model gateway expects."""
+    data = []
+    for name in _ordered_presets():
+        p = PRESETS[name]
+        ctx = re.search(r"(?:-c |MAXLEN=)(\d+)", p.get("args") or p.get("cmd", ""))
+        max_in = int(ctx.group(1)) if ctx else DEFAULT_CTX
+        data.append({
+            "model_group": name,
+            "mode": "chat",
+            "supports_function_calling": True,
+            "max_input_tokens": max_in,
+            "max_output_tokens": min(8192, max_in // 4),
+            "input_cost_per_token": 0,
+            "output_cost_per_token": 0,
+        })
+    return {"data": data}
+
+
 async def preload_all():
     for name in PRELOAD:
         try:
@@ -385,6 +412,13 @@ def selftest():
         assert r.status_code == 401, r.status_code
         r = await anon.get("/health")
         assert r.status_code == 200, r.status_code  # health stays open
+        litellm = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://t",
+                                    headers={"x-litellm-api-key": "sk-test"})
+        r = await litellm.get("/v1/models")
+        assert r.status_code == 200, r.status_code  # bare key header works too
+        assert not authorized({"x-litellm-api-key": "sk-wrong"})
+        assert not authorized({"authorization": "sk-test"})  # bare key, wrong header
         r = await api.get("/v1/models")
         listed = [m["id"] for m in r.json()["data"]]
         assert set(listed) == set(PRESETS)
