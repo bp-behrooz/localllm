@@ -83,6 +83,7 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 | `*_BOX_VERSION` | npm version/tag of the agent itself |
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM sizing (default 4 / 4G) |
 | `*_BOX_SSH` | forward your ssh-agent in, and pass `gh auth token` along |
+| `*_BOX_PROFILE` | read the box home's `.env.<name>` (lines like `export SOME_VAR=SOME_VAL`) and pass its variables in |
 | `*_BOX_DOCKER` | let the agent drive the Mac's Docker engine |
 | `*_BOX_DOCKER_SOCK` | which Docker socket (auto-detected; colima first) |
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | the localhost DNS domain used for that |
@@ -122,7 +123,12 @@ print the directory's size before they touch it.
 
 ## Flags
 
-Shared by all three: `--rebuild`, `--build-only`, `--ssh`, `--clean`,
-`--clean-all`. pi-box and opencode-box add `--sync` and `--sync-only`, which
-re-read the served model list from the LLM server. Everything else is passed
-through to the agent.
+Shared by all three: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
+`--clean`, `--clean-all`. pi-box and opencode-box add `--sync` and `--sync-only`,
+which re-read the served model list from the LLM server. Everything else is
+passed through to the agent.
+
+`--profile=NAME` reads `$<box home>/.env.NAME` — a shell file of
+`export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into
+the box, so a per-project or per-task set of credentials and endpoints is one
+flag away without exporting anything in your own shell.

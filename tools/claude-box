@@ -10,6 +10,9 @@
 #   claude-box --build-only        (re)build the image and exit
 #   claude-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                 host's gh token along (same as CL_BOX_SSH=1)
+#   claude-box --profile=NAME      read $CL_BOX_HOME/.env.NAME (lines like
+#                                 `export SOME_VAR=SOME_VAL`) and pass its
+#                                 variables into the box (same as CL_BOX_PROFILE)
 #   claude-box --clean             drop the box's runtimes and caches, keep its login
 #   claude-box --clean-all         delete CL_BOX_HOME entirely (asks first)
 #
@@ -56,6 +59,8 @@
 #   CL_BOX_CPUS / CL_BOX_MEMORY  VM sizing (default 4 / 4G)
 #   CL_BOX_SSH          1: forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
+#   CL_BOX_PROFILE      name of a profile: $CL_BOX_HOME/.env.NAME is read and its
+#                       variables passed into the box (same as --profile=NAME)
 #   CL_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Bridges your
 #                       Docker socket to TCP with socat and sets up Apple's localhost
 #                       DNS domain for container->Mac traffic (sudo, once per boot).
@@ -117,6 +122,12 @@ while [[ $# -gt 0 ]]; do
     # through BOX_ENV_PREFIX, which shellcheck can't follow.
     # shellcheck disable=SC2034
     CL_BOX_SSH=1
+    shift
+    ;;
+  --profile=*)
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
+    # shellcheck disable=SC2034
+    CL_BOX_PROFILE="${1#--profile=}"
     shift
     ;;
   --)

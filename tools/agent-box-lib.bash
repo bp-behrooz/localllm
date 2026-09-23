@@ -17,8 +17,8 @@
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
-# _HOST_ALIAS_IP, _SSH, _CPUS and _MEMORY, and names that same variable when it
-# has to complain about it.
+# _HOST_ALIAS_IP, _SSH, _CPUS, _MEMORY and _PROFILE, and names that same
+# variable when it has to complain about it.
 #
 # ...and defines one function:
 #
@@ -292,14 +292,42 @@ _box_gh_env() {
   fi
 }
 
+# _box_profile: if the script's flag set *_BOX_PROFILE, read
+# $BOX_HOME/.env.<name> (shell lines, e.g. `export SOME_VAR=SOME_VAL`) and
+# pass each variable into the box by name only, so the value stays out of the
+# host's process list.
+_box_profile() {
+  local name file line n=0
+  name="$(box_knob PROFILE "")"
+  [[ -n $name ]] || return 0
+  file="$BOX_HOME/.env.$name"
+  [[ -f $file ]] || {
+    echo "error: profile '$name' not found: $file" >&2
+    exit 1
+  }
+  BOX_PROFILE_ENV=()
+  while IFS= read -r line || [[ -n $line ]]; do
+    line="${line#export }"
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+    # export, not just assign: --env NAME inherits from the environment, so a
+    # bare shell variable would pass nothing.
+    eval "export $line"
+    BOX_PROFILE_ENV+=(--env "${BASH_REMATCH[1]}")
+    n=$((n + 1))
+  done <"$file"
+  echo "==> profile $name: $n var(s) passed" >&2
+}
+
 # Fills BOX_RUN_ARGS with the flags every box passes: the project mounted at its
 # own Mac path (so bind-mount paths the agent hands to docker mean the same
 # thing to the Mac's daemon), BOX_HOME as the box's whole /root, VM sizing, the
-# docker bridge, git identity, gh token and the ssh-agent. Call
-# box_docker_bridge first. The per-agent --env flags stay in the calling script.
+# docker bridge, git identity, gh token, the ssh-agent and the profile's vars.
+# Call box_docker_bridge first. The per-agent --env flags stay in the calling
+# script.
 box_run_args() {
   _box_git_env
   _box_gh_env
+  _box_profile
 
   mkdir -p "$BOX_HOME"
   BOX_RUN_ARGS=(
@@ -320,6 +348,7 @@ box_run_args() {
     ${BOX_DOCKER_ENV[@]+"${BOX_DOCKER_ENV[@]}"}
     ${BOX_GIT_ENV[@]+"${BOX_GIT_ENV[@]}"}
     ${BOX_GH_ENV[@]+"${BOX_GH_ENV[@]}"}
+    ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
   if [[ -n "$(box_knob SSH)" ]]; then
     BOX_RUN_ARGS+=(--ssh)

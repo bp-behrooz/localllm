@@ -9,6 +9,9 @@
 #   opencode-box --sync-only         refresh the local model list and exit
 #   opencode-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                    host's gh token along (same as OC_BOX_SSH=1)
+#   opencode-box --profile=NAME      read $OC_BOX_HOME/.env.NAME (lines like
+#                                    `export SOME_VAR=SOME_VAL`) and pass its
+#                                    variables into the box (same as OC_BOX_PROFILE)
 #   opencode-box --clean             drop the box's runtimes and caches, keep its config
 #   opencode-box --clean-all         delete OC_BOX_HOME entirely (asks first)
 #
@@ -41,6 +44,8 @@
 #   OC_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
 #   OC_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
+#   OC_BOX_PROFILE      name of a profile: $OC_BOX_HOME/.env.NAME is read and its
+#                       variables passed into the box (same as --profile=NAME)
 #   OC_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
 #   OC_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
 #   OC_BOX_CPUS / OC_BOX_MEMORY  VM sizing (default 4 / 4G)
@@ -110,6 +115,12 @@ while [[ $# -gt 0 ]]; do
     # through BOX_ENV_PREFIX, which shellcheck can't follow.
     # shellcheck disable=SC2034
     OC_BOX_SSH=1
+    shift
+    ;;
+  --profile=*)
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
+    # shellcheck disable=SC2034
+    OC_BOX_PROFILE="${1#--profile=}"
     shift
     ;;
   --)
