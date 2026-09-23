@@ -203,8 +203,10 @@ box_ensure_host_alias() {
   sudo container system dns create "$alias" --localhost "$ip"
 
   # The runtime needs a restart to pick up the change. Don't yank it out from
-  # under running containers (ours or anyone else's).
-  if [[ -n "$(container list --quiet 2>/dev/null)" ]]; then
+  # under running containers (ours or anyone else's). The buildkit builder
+  # doesn't count: the runtime starts it on demand for the next build, and it's
+  # left running after our own image build, so it would block this forever.
+  if [[ -n "$(container list --quiet 2>/dev/null | grep -v '^buildkit')" ]]; then
     echo "error: containers are running, so the runtime can't be restarted to pick up the change." >&2
     echo "       When they're done:  container system stop && container system start" >&2
     echo "       then relaunch." >&2
