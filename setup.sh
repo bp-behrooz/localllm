@@ -4,7 +4,7 @@
 #                                       else the pool downloads on first request, slower)
 #        ./setup.sh remove <preset>     delete a preset's downloaded files
 # First run ever: HF_TOKEN=hf_xxx ./setup.sh   (token is stored, not needed again)
-# Requires pool.py next to this script.
+# Requires pool/pool.py next to this script.
 set -euo pipefail
 
 # HIP device indices of the two R9700s — verify with `llama-server --list-devices`
@@ -83,7 +83,7 @@ remove)
 esac
 
 LLAMA_BIN="$(command -v llama-server)"
-[[ -f "$(dirname "$0")/pool.py" ]] || { echo "pool.py not found next to $0"; exit 1; }
+[[ -f "$(dirname "$0")/pool/pool.py" ]] || { echo "pool/pool.py not found next to $0"; exit 1; }
 
 # ---------- one-time provisioning (idempotent, skipped when done) ----------
 id localllm &>/dev/null || useradd -r -m -d /opt/localllm -s "$(command -v nologin)" localllm
@@ -93,7 +93,7 @@ usermod -aG render,video localllm
 getent group docker >/dev/null && usermod -aG docker localllm
 [[ -x /opt/localllm/venv/bin/uvicorn ]] || {
   [[ -d /opt/localllm/venv ]] || python3 -m venv /opt/localllm/venv
-  /opt/localllm/venv/bin/pip install -q --upgrade pip fastapi uvicorn httpx
+  /opt/localllm/venv/bin/pip install -q --upgrade pip -r "$(dirname "$0")/pool/requirements.txt"
 }
 [[ -x /opt/localllm/venv/bin/hf ]] \
   || /opt/localllm/venv/bin/pip install -q 'huggingface_hub[hf_xet]'
@@ -126,7 +126,7 @@ chmod 600 /opt/localllm/env
   done
   printf '\n  }\n}\n'
 } >/opt/localllm/pool.json
-install -m 644 "$(dirname "$0")/pool.py" /opt/localllm/pool.py
+install -m 644 "$(dirname "$0")/pool/pool.py" /opt/localllm/pool.py
 
 chown -R localllm:localllm /opt/localllm
 chmod 600 /opt/localllm/env

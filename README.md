@@ -14,8 +14,9 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 | File | Role |
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
-| `pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
+| `pool/pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
 | [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
+| `pool/test.sh` | self-test: bootstraps a local `.venv` and runs `pool.py --test` (no GPUs needed) |
 
 ## Requirements
 
@@ -86,7 +87,7 @@ After editing presets, re-run `sudo ./setup.sh` to apply. Other subcommands:
   idle** instance is evicted; duplicate instances are sacrificed before any
   model's last instance.
 - A saturated model **scales out** onto a free GPU, or onto one whose model
-  has been idle 10+ minutes (`IDLE_SCALE_EVICT` in `pool.py`).
+  has been idle 10+ minutes (`IDLE_SCALE_EVICT` in `pool/pool.py`).
 - Instances with requests in flight are never evicted; if nothing can be
   evicted the request gets a 503.
 
@@ -94,7 +95,9 @@ Inspect the pool: `curl -s localhost:4000/health | python3 -m json.tool`
 (`/health` is the one endpoint that doesn't require the key; it reveals only
 which models are loaded).
 
-Self-test (no GPUs needed): `python3 pool.py --test`
+Self-test (no GPUs needed): `./pool/test.sh` — bootstraps a local `.venv` with
+the dependencies (and, with mise, the python pinned in `mise.toml`) and runs
+`pool/pool.py --test`.
 
 ## Remote access via Caddy
 
