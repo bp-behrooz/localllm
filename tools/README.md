@@ -77,7 +77,7 @@ with the container. System packages belong in the image (below).
 ### 3. Per-launch behavior: env knobs
 
 Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box,
-`PI_BOX_` for pi-box, `OC_BOX_` for opencode-box:
+`PI_BOX_` for pi-box, `OC_BOX_` for opencode-box, `OCR_BOX_` for ocr-box:
 
 | knob | does |
 |---|---|
@@ -93,6 +93,11 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 Each script's header documents its own knobs on top of these — model defaults
 and provider hiding for pi-box and opencode-box, the review model for ocr-box,
 renderer and mouse handling for claude-box.
+
+Two knobs carry no prefix, because they name this repo's server rather than a
+box: `LOCAL_LLM_URL` (the OpenAI-compatible base URL) and `LOCAL_LLM_API_KEY`.
+pi-box, opencode-box and ocr-box all read the same pair — export them once.
+Point one box elsewhere with `LOCAL_LLM_URL=… ./tools/pi-box`.
 
 ### 4. System packages: the image
 

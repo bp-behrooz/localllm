@@ -149,11 +149,11 @@ don't want any of this; nothing else depends on it.
 ## Agents (pi / OpenCode / OCR)
 
 `tools/pi-box`, `tools/opencode-box` and `tools/ocr-box` run the respective
-agent in a sandboxed Apple `container` VM (Apple Silicon, macOS 26). They take
-the server's base URL and key from the environment:
+agent in a sandboxed Apple `container` VM (Apple Silicon, macOS 26). All three
+take the server's base URL and key from the same two environment variables:
 
 ```bash
-export PI_BOX_LOCAL_URL=https://example.com/localllm/v1   # OC_BOX_/OCR_BOX_LOCAL_URL for the others
+export LOCAL_LLM_URL=https://example.com/localllm/v1
 export LOCAL_LLM_API_KEY=sk-xxx
 ./tools/pi-box          # or: ./tools/opencode-box
 ./tools/ocr-box review  # or: ocr-box scan — Open Code Review, one model per run

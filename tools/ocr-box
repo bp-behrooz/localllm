@@ -35,7 +35,7 @@
 #   OCR_BOX_VERSION      npm version/tag of @alibaba-group/open-code-review
 #                        (default "latest")
 #   OCR_BOX_HOME         host dir for the box's own config/state (default ~/.ocr-box)
-#   OCR_BOX_LOCAL_URL    OpenAI-compatible base URL of your LLM server,
+#   LOCAL_LLM_URL        OpenAI-compatible base URL of your LLM server,
 #                        e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY    its API key; passed into the container, never written to disk
 #   OCR_BOX_MODEL        which served model reviews (default: the first one the
@@ -141,11 +141,9 @@ EOF
 # ocr reviews with one model, named by OCR_LLM_MODEL. Default it to the first
 # model the server serves, so a bare `ocr-box review` works out of the box.
 default_model() {
-  : "${OCR_BOX_LOCAL_URL:?set OCR_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
-  : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
-  OCR_URL="$OCR_BOX_LOCAL_URL" LOCAL_LLM_API_KEY="$LOCAL_LLM_API_KEY" python3 - <<'PYEOF'
+  python3 - <<'PYEOF'
 import json, os, sys, urllib.request
-base = os.environ["OCR_URL"].rstrip("/")
+base = os.environ["LOCAL_LLM_URL"].rstrip("/")
 root = base[:-3] if base.endswith("/v1") else base
 req = urllib.request.Request(f"{root}/model/info",
                              headers={"Authorization": f"Bearer {os.environ['LOCAL_LLM_API_KEY']}"})
@@ -172,7 +170,7 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi
 
-: "${OCR_BOX_LOCAL_URL:?set OCR_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+: "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
 : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
 OCR_LLM_MODEL="${OCR_BOX_MODEL:-$(default_model)}"
 # Exported rather than passed by value: `--env NAME` inherits it, keeping the
@@ -185,7 +183,7 @@ box_docker_bridge
 # not exec: the socat trap must outlive ocr
 box_run_args
 container run "${BOX_RUN_ARGS[@]}" \
-  --env "OCR_LLM_URL=$OCR_BOX_LOCAL_URL" \
+  --env "OCR_LLM_URL=$LOCAL_LLM_URL" \
   --env "OCR_LLM_PROTOCOL=${OCR_LLM_PROTOCOL:-openai}" \
   --env OCR_LLM_MODEL \
   --env OCR_LLM_TOKEN \

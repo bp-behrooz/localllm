@@ -30,7 +30,7 @@
 # Env knobs:
 #   PI_BOX_VERSION      npm version/tag of pi (default "latest")
 #   PI_BOX_HOME         host dir for the box's own pi config/state (default ~/.pi-box)
-#   PI_BOX_LOCAL_URL    OpenAI-compatible base URL of your LLM server,
+#   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
 #   PI_BOX_DEFAULT      default provider/model, e.g. "local/qwen3-coder" or
@@ -147,7 +147,7 @@ sync_models() {
   # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
   # the "local" provider's model list in models.json. Other providers and any
   # hand-edited fields are kept. Seeds settings.json on first run.
-  : "${PI_BOX_LOCAL_URL:?set PI_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+  : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
   : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
   mkdir -p "$PI_AGENT_HOME/sessions"
 
@@ -156,7 +156,7 @@ import json, os, sys, urllib.request
 from pathlib import Path
 
 home = Path(os.environ["PI_AGENT_HOME"])
-base = os.environ["PI_BOX_LOCAL_URL"].rstrip("/")
+base = os.environ["LOCAL_LLM_URL"].rstrip("/")
 key  = os.environ["LOCAL_LLM_API_KEY"]
 root = base[:-3] if base.endswith("/v1") else base
 
