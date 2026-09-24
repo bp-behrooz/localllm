@@ -259,7 +259,7 @@ box_docker_bridge() {
   local port=$((20000 + RANDOM % 20000))
   socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
   BOX_SOCAT_PID=$!
-  trap 'kill "$BOX_SOCAT_PID" 2>/dev/null' EXIT
+  trap 'kill -9 "$BOX_SOCAT_PID" 2>/dev/null' EXIT   # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
   BOX_DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$port")
   echo "==> docker: $sock -> tcp://$alias:$port (this session only)" >&2
 }
