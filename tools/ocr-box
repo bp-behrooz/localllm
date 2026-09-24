@@ -6,6 +6,8 @@
 #                                ocr-box review / ocr-box scan / ocr-box session list
 #   ocr-box --rebuild [args...]  delete existing image, rebuild, then run
 #   ocr-box --build-only         (re)build the image and exit
+#   ocr-box --sync [args...]    refresh the local model list from the server, then run
+#   ocr-box --sync-only         refresh the local model list and exit
 #   ocr-box --ssh [args...]      forward your ssh-agent into the box, and pass the
 #                                host's gh token along (same as OCR_BOX_SSH=1)
 #   ocr-box --profile=NAME       read $OCR_BOX_HOME/.env.NAME (lines like
@@ -14,15 +16,18 @@
 #   ocr-box --clean              drop the box's runtimes and caches, keep its config
 #   ocr-box --clean-all          delete OCR_BOX_HOME entirely (asks first)
 #
-# Unlike pi-box and opencode-box there is no --sync: `ocr` takes one model name,
-# not a provider's model list, so it is configured entirely through the
-# OCR_LLM_* environment variables and nothing is written to disk. Review
-# sessions land in $OCR_BOX_HOME/.opencodereview/sessions and survive.
+# Like pi-box and opencode-box it has --sync / --sync-only: on first launch
+# (or with --sync) it queries the server and writes the served models into the
+# box's own config ($OCR_BOX_HOME/.opencodereview/config.json) as a "localllm"
+# custom provider, which `ocr` prefers over any environment. Re-run with --sync
+# after preset changes. Review sessions land in
+# $OCR_BOX_HOME/.opencodereview/sessions and survive.
 #
 # OCR_BOX_HOME is the box's entire /root, so anything installed into the home
 # directory survives the container being thrown away: mise runtimes, ~/.npm,
 # shell history. System packages (apt) are not covered — those belong in the
-# image. --clean empties it again.
+# image. --clean empties it again but keeps the config (which holds the API
+# key); --clean-all is what removes the credential.
 #
 # Language runtimes come from mise: its shims are on PATH, so a project's own
 # mise.toml applies in the non-interactive shells `ocr` runs commands in.
@@ -36,13 +41,13 @@
 #                        (default "latest")
 #   OCR_BOX_HOME         host dir for the box's own config/state (default ~/.ocr-box)
 #   LOCAL_LLM_URL        OpenAI-compatible base URL of your LLM server,
-#                        e.g. https://llm.example.com/v1
-#   LOCAL_LLM_API_KEY    its API key; passed into the container, never written to disk
+#                        e.g. https://llm.example.com/v1 — needed to --sync, or on
+#                        first launch before config.json exists
+#   LOCAL_LLM_API_KEY    its API key; written into the box's config on --sync
 #   OCR_BOX_MODEL        which served model reviews (default: the first one the
 #                        server reports)
-#   OCR_LLM_PROTOCOL     defaults to "openai"; set it in your environment to
-#                        point the box at a non-OpenAI endpoint instead
-#   OCR_LLM_TIMEOUT      passed through if set (e.g. "120s")
+#   (timeout)            set `timeout_sec` in the config's localllm entry (replaces
+#                        the removed OCR_LLM_TIMEOUT env knob)
 #   OCR_BOX_DOCKER       1 to expose the Mac's Docker daemon to the box (see notes)
 #   OCR_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
 #   OCR_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
@@ -60,6 +65,7 @@ BOX_ENV_PREFIX="OCR_BOX"
 
 OCR_VERSION="${OCR_BOX_VERSION:-latest}"
 OCR_BOX_HOME="${OCR_BOX_HOME:-$HOME/.ocr-box}"
+OCR_CONFIG="$OCR_BOX_HOME/.opencodereview/config.json"
 BOX_HOME="$OCR_BOX_HOME"
 BOX_KEEP=(.opencodereview)
 
@@ -83,6 +89,8 @@ source "$dir/agent-box-lib.bash"
 # ---------------------------------------------------------------- flags -----
 REBUILD=0
 BUILD_ONLY=0
+SYNC=0
+SYNC_ONLY=0
 CLEAN=
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +100,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --build-only)
     BUILD_ONLY=1
+    shift
+    ;;
+  --sync)
+    SYNC=1
+    shift
+    ;;
+  --sync-only)
+    SYNC_ONLY=1
     shift
     ;;
   --clean)
@@ -138,28 +154,88 @@ ENTRYPOINT ["ocr"]
 EOF
 }
 
-# ocr reviews with one model, named by OCR_LLM_MODEL. Default it to the first
-# model the server serves, so a bare `ocr-box review` works out of the box.
-default_model() {
+sync_config() {
+  # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
+  # the "localllm" custom provider in config.json — its endpoint, key, protocol
+  # and model list. Other providers and any hand-edited fields are kept. Seeds
+  # the active provider/model on first run. `ocr` prefers this config over any
+  # environment, so this is the single source of truth for the endpoint.
+  : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
+  : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
+  mkdir -p "$(dirname "$OCR_CONFIG")"
+
+  OCR_CONFIG="$OCR_CONFIG" OCR_BOX_MODEL="${OCR_BOX_MODEL:-}" \
+  LOCAL_LLM_URL="$LOCAL_LLM_URL" LOCAL_LLM_API_KEY="$LOCAL_LLM_API_KEY" \
   python3 - <<'PYEOF'
 import json, os, sys, urllib.request
-base = os.environ["LOCAL_LLM_URL"].rstrip("/")
-root = base[:-3] if base.endswith("/v1") else base
+from pathlib import Path
+
+cpath = Path(os.environ["OCR_CONFIG"])
+base  = os.environ["LOCAL_LLM_URL"].rstrip("/")
+key   = os.environ["LOCAL_LLM_API_KEY"]
+root  = base[:-3] if base.endswith("/v1") else base
+
 req = urllib.request.Request(f"{root}/model/info",
-                             headers={"Authorization": f"Bearer {os.environ['LOCAL_LLM_API_KEY']}"})
+                             headers={"Authorization": f"Bearer {key}"})
 try:
     data = json.load(urllib.request.urlopen(req, timeout=15))["data"]
 except Exception as e:
-    sys.exit(f"error: could not fetch {root}/model/info: {e}; or set OCR_BOX_MODEL")
-if not data:
+    sys.exit(f"error: could not fetch {root}/model/info: {e}")
+
+models = [m["model_name"] for m in data]
+if not models:
     sys.exit("error: the server reported no models")
-print(data[0]["model_name"])
+
+if cpath.is_file():
+    try:
+        cfg = json.loads(cpath.read_text())
+    except json.JSONDecodeError as e:
+        sys.exit("error: %s is not valid JSON: %s" % (cpath, e))
+else:
+    cfg = {}
+prov = cfg.setdefault("custom_providers", {}).setdefault("localllm", {})
+# Always refresh the endpoint and the served model list. protocol is a fixed
+# property of the (OpenAI-compatible) server, so default it but don't clobber a
+# hand-set value on re-sync.
+prov["api_key"]  = key
+prov["url"]      = base
+prov.setdefault("protocol", "openai")
+prov["models"]   = models
+
+# Manage the active model only while localllm is the active provider (or on
+# seed): explicit OCR_BOX_MODEL > the current choice > the first served model.
+if cfg.get("provider", "localllm") == "localllm":
+    model = (os.environ.get("OCR_BOX_MODEL") or prov.get("model")
+             or cfg.get("model") or models[0])
+    if model not in models:
+        if os.environ.get("OCR_BOX_MODEL"):
+            # Fresh user input that is wrong: fail loudly.
+            sys.exit("error: OCR_BOX_MODEL %r is not served; served: %s"
+                     % (model, ", ".join(models)))
+        # A previously-saved model the server no longer offers: warn and recover.
+        print("warning: configured model %r is no longer served; using %s"
+              % (model, models[0]), file=sys.stderr)
+        model = models[0]
+    prov["model"] = model
+    cfg["model"]  = model
+    if "provider" not in cfg:
+        cfg["provider"] = "localllm"
+        print("==> active provider localllm, model %s" % model, file=sys.stderr)
+
+cpath.write_text(json.dumps(cfg, indent=2) + "\n")
+print("==> synced %d model(s) for localllm: %s" % (len(models), ", ".join(models)),
+      file=sys.stderr)
 PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
 if [[ -n $CLEAN ]]; then
   box_clean "$CLEAN"
+  exit 0
+fi
+
+if [[ $SYNC_ONLY -eq 1 ]]; then
+  sync_config
   exit 0
 fi
 
@@ -170,22 +246,14 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi
 
-: "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
-: "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
-OCR_LLM_MODEL="${OCR_BOX_MODEL:-$(default_model)}"
-# Exported rather than passed by value: `--env NAME` inherits it, keeping the
-# key out of the host's process list.
-OCR_LLM_TOKEN="$LOCAL_LLM_API_KEY"
-export OCR_LLM_MODEL OCR_LLM_TOKEN
+# Seed the config on first launch (no config.json yet), or refresh on --sync.
+if [[ $SYNC -eq 1 || ! -f "$OCR_CONFIG" ]]; then
+  sync_config
+fi
 
 box_docker_bridge
 
 # not exec: the socat trap must outlive ocr
 box_run_args
 container run "${BOX_RUN_ARGS[@]}" \
-  --env "OCR_LLM_URL=$LOCAL_LLM_URL" \
-  --env "OCR_LLM_PROTOCOL=${OCR_LLM_PROTOCOL:-openai}" \
-  --env OCR_LLM_MODEL \
-  --env OCR_LLM_TOKEN \
-  --env OCR_LLM_TIMEOUT \
   "$BOX_IMAGE" "$@"

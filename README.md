@@ -159,11 +159,12 @@ export LOCAL_LLM_API_KEY=sk-xxx
 ./tools/ocr-box review  # or: ocr-box scan — Open Code Review, one model per run
 ```
 
-On first launch (or with `--sync`) pi-box and opencode-box query the server and
-write the served models, with context limits, into the box's own config under
-`~/.pi-box` / `~/.opencode-box` — re-run with `--sync` after preset changes.
-ocr-box has no model list to sync: it reviews with `OCR_BOX_MODEL`, defaulting
-to the first model the server reports.
+On first launch (or with `--sync`) all three query the server and write the
+served models into the box's own config under `~/.pi-box` / `~/.opencode-box` /
+`~/.ocr-box` — re-run with `--sync` after preset changes. pi-box and
+opencode-box record context limits too; ocr-box writes a `localllm` provider
+that `ocr` prefers over any environment, reviewing with `OCR_BOX_MODEL`
+(default: the first model the server reports).
 
 Worth doing once: alias the boxes to the agents' own names
 (`alias pi=pi-box claude=claude-box opencode=opencode-box`), so the resume hint

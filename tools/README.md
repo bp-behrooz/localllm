@@ -131,10 +131,11 @@ print the directory's size before they touch it.
 ## Flags
 
 Shared by all four: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
-`--clean`, `--clean-all`. pi-box and opencode-box add `--sync` and `--sync-only`,
-which re-read the served model list from the LLM server; ocr-box has no model
-list to sync — it reviews with one model, `OCR_BOX_MODEL`, defaulting to the
-first one the server reports. Everything else is passed through to the agent.
+`--clean`, `--clean-all`, `--sync`, `--sync-only`. The `--sync` flags re-read
+the served model list from the LLM server and rewrite the box's config —
+pi-box and opencode-box record context limits too, ocr-box writes a `localllm`
+provider (reviewing with `OCR_BOX_MODEL`, default: the first model the server
+reports). Everything else is passed through to the agent.
 
 `--profile=NAME` reads `$<box home>/.env.NAME` — a shell file of
 `export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into
