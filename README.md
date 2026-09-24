@@ -165,6 +165,11 @@ write the served models, with context limits, into the box's own config under
 ocr-box has no model list to sync: it reviews with `OCR_BOX_MODEL`, defaulting
 to the first model the server reports.
 
+Worth doing once: alias the boxes to the agents' own names
+(`alias pi=pi-box claude=claude-box opencode=opencode-box`), so the resume hint
+each agent prints as it exits — `pi --session <id>` — is copy-pasteable.
+See [Resuming a session](tools/README.md#resuming-a-session).
+
 [`tools/README.md`](tools/README.md) covers the rest: what persists between
 runs, how to customize a box and how to clean it out again.
 

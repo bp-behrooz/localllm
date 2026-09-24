@@ -140,3 +140,21 @@ first one the server reports. Everything else is passed through to the agent.
 `export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into
 the box, so a per-project or per-task set of credentials and endpoints is one
 flag away without exporting anything in your own shell.
+
+## Resuming a session
+
+Each agent prints its own resume hint as it exits — `pi --session <id>`,
+`claude --resume <id>`, `opencode -s <id>` — naming a command that doesn't
+exist on the Mac, because only the `*-box` wrappers do. Give the wrappers those
+names and every hint an agent ever prints becomes copy-pasteable, for any
+session and any flag:
+
+```bash
+alias pi=pi-box claude=claude-box opencode=opencode-box   # in your shell rc
+ln -s /path/to/tools/pi-box ~/bin/pi                      # or on PATH instead
+```
+
+Aliases apply to your interactive shell, which is exactly where you paste the
+hint. They do shadow a natively installed agent of the same name — if you run
+both, alias to something else (`alias pibox=pi-box`); the hint is only wrong
+about the one word you can complete yourself.
