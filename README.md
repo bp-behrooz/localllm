@@ -15,7 +15,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool/pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
-| [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
+| [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode / Open Code Review against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
 | `pool/test.sh` | self-test: bootstraps a local `.venv` and runs `pool.py --test` (no GPUs needed) |
 
 ## Requirements
@@ -146,21 +146,24 @@ slower than a llama-server preset — engine init plus, on the very first run,
 kernel compilation. Delete the preset from the table (and `PRELOAD`) if you
 don't want any of this; nothing else depends on it.
 
-## Agents (pi / OpenCode)
+## Agents (pi / OpenCode / OCR)
 
-`tools/pi-box` and `tools/opencode-box` run the respective agent in a
-sandboxed Apple `container` VM (Apple Silicon, macOS 26). They take the
-server's base URL and key from the environment:
+`tools/pi-box`, `tools/opencode-box` and `tools/ocr-box` run the respective
+agent in a sandboxed Apple `container` VM (Apple Silicon, macOS 26). They take
+the server's base URL and key from the environment:
 
 ```bash
-export PI_BOX_LOCAL_URL=https://example.com/localllm/v1   # OC_BOX_LOCAL_URL for opencode-box
+export PI_BOX_LOCAL_URL=https://example.com/localllm/v1   # OC_BOX_/OCR_BOX_LOCAL_URL for the others
 export LOCAL_LLM_API_KEY=sk-xxx
 ./tools/pi-box          # or: ./tools/opencode-box
+./tools/ocr-box review  # or: ocr-box scan — Open Code Review, one model per run
 ```
 
-On first launch (or with `--sync`) they query the server and write the served
-models, with context limits, into the box's own config under `~/.pi-box` /
-`~/.opencode-box` — re-run with `--sync` after preset changes.
+On first launch (or with `--sync`) pi-box and opencode-box query the server and
+write the served models, with context limits, into the box's own config under
+`~/.pi-box` / `~/.opencode-box` — re-run with `--sync` after preset changes.
+ocr-box has no model list to sync: it reviews with `OCR_BOX_MODEL`, defaulting
+to the first model the server reports.
 
 [`tools/README.md`](tools/README.md) covers the rest: what persists between
 runs, how to customize a box and how to clean it out again.

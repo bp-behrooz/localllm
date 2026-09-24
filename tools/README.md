@@ -1,6 +1,6 @@
 # The agent boxes
 
-Three scripts that run a coding agent inside an Apple `container` VM confined to
+Four scripts that run a coding agent inside an Apple `container` VM confined to
 `$PWD`, so the agent can be given every permission and the VM is the boundary:
 
 | script | agent |
@@ -8,6 +8,7 @@ Three scripts that run a coding agent inside an Apple `container` VM confined to
 | [`claude-box`](claude-box) | Claude Code (talks to Anthropic; unrelated to this repo's server) |
 | [`pi-box`](pi-box) | the pi coding agent, against [the local LLM server](../README.md) |
 | [`opencode-box`](opencode-box) | OpenCode, against [the local LLM server](../README.md) |
+| [`ocr-box`](ocr-box) | Open Code Review (`ocr`), against [the local LLM server](../README.md) — reviews a diff or scans whole files; not an interactive agent, so `ocr-box review`, `ocr-box scan`, … |
 
 [`agent-box-lib.bash`](agent-box-lib.bash) is the half they share — image
 lifecycle, the Mac-loopback DNS domain, the Docker bridge, the common
@@ -64,6 +65,7 @@ The box's home directory on the Mac is mounted as the container's entire
 | `claude-box` | `~/.claude-box` | `.claude/` — login, settings, `CLAUDE.md`, history |
 | `pi-box` | `~/.pi-box` | `.pi/` — config, models, sessions |
 | `opencode-box` | `~/.opencode-box` | `.config/opencode/`, `.local/share/opencode/` |
+| `ocr-box` | `~/.ocr-box` | `.opencodereview/` — config, `rule.json`, review sessions |
 
 So mise runtimes (`~/.local/share/mise`), gems installed into them, `~/.npm`,
 `~/.cargo`, `~/.gitconfig`, `~/.bashrc` and shell history all persist.
@@ -89,15 +91,15 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | the localhost DNS domain used for that |
 
 Each script's header documents its own knobs on top of these — model defaults
-and provider hiding for pi-box and opencode-box, renderer and mouse handling for
-claude-box.
+and provider hiding for pi-box and opencode-box, the review model for ocr-box,
+renderer and mouse handling for claude-box.
 
 ### 4. System packages: the image
 
 Adding an apt package, or anything else that lives outside `$HOME`, means
 editing `box_dockerfile_base` in [`agent-box-lib.bash`](agent-box-lib.bash) —
 there is no per-user config file for this yet, so the change is shared by all
-three boxes. Then
+four boxes. Then
 rebuild each box you want it in:
 
 ```bash
@@ -123,10 +125,11 @@ print the directory's size before they touch it.
 
 ## Flags
 
-Shared by all three: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
+Shared by all four: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
 `--clean`, `--clean-all`. pi-box and opencode-box add `--sync` and `--sync-only`,
-which re-read the served model list from the LLM server. Everything else is
-passed through to the agent.
+which re-read the served model list from the LLM server; ocr-box has no model
+list to sync — it reviews with one model, `OCR_BOX_MODEL`, defaulting to the
+first one the server reports. Everything else is passed through to the agent.
 
 `--profile=NAME` reads `$<box home>/.env.NAME` — a shell file of
 `export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into

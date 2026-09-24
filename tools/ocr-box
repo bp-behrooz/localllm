@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# ocr-box: run Open Code Review (`ocr`) in an Apple `container` VM confined to
+# $PWD, against the local LLM server.
+#
+#   ocr-box [ocr args...]        run (builds the image on first use), e.g.
+#                                ocr-box review / ocr-box scan / ocr-box session list
+#   ocr-box --rebuild [args...]  delete existing image, rebuild, then run
+#   ocr-box --build-only         (re)build the image and exit
+#   ocr-box --ssh [args...]      forward your ssh-agent into the box, and pass the
+#                                host's gh token along (same as OCR_BOX_SSH=1)
+#   ocr-box --profile=NAME       read $OCR_BOX_HOME/.env.NAME (lines like
+#                                `export SOME_VAR=SOME_VAL`) and pass its
+#                                variables into the box (same as OCR_BOX_PROFILE)
+#   ocr-box --clean              drop the box's runtimes and caches, keep its config
+#   ocr-box --clean-all          delete OCR_BOX_HOME entirely (asks first)
+#
+# Unlike pi-box and opencode-box there is no --sync: `ocr` takes one model name,
+# not a provider's model list, so it is configured entirely through the
+# OCR_LLM_* environment variables and nothing is written to disk. Review
+# sessions land in $OCR_BOX_HOME/.opencodereview/sessions and survive.
+#
+# OCR_BOX_HOME is the box's entire /root, so anything installed into the home
+# directory survives the container being thrown away: mise runtimes, ~/.npm,
+# shell history. System packages (apt) are not covered — those belong in the
+# image. --clean empties it again.
+#
+# Language runtimes come from mise: its shims are on PATH, so a project's own
+# mise.toml applies in the non-interactive shells `ocr` runs commands in.
+# See tools/README.md for the customization options.
+#
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
+# and agent-box-lib.bash sitting next to this script.
+#
+# Env knobs:
+#   OCR_BOX_VERSION      npm version/tag of @alibaba-group/open-code-review
+#                        (default "latest")
+#   OCR_BOX_HOME         host dir for the box's own config/state (default ~/.ocr-box)
+#   OCR_BOX_LOCAL_URL    OpenAI-compatible base URL of your LLM server,
+#                        e.g. https://llm.example.com/v1
+#   LOCAL_LLM_API_KEY    its API key; passed into the container, never written to disk
+#   OCR_BOX_MODEL        which served model reviews (default: the first one the
+#                        server reports)
+#   OCR_LLM_PROTOCOL     defaults to "openai"; set it in your environment to
+#                        point the box at a non-OpenAI endpoint instead
+#   OCR_LLM_TIMEOUT      passed through if set (e.g. "120s")
+#   OCR_BOX_DOCKER       1 to expose the Mac's Docker daemon to the box (see notes)
+#   OCR_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
+#   OCR_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
+#                        and, so `gh` works too, pass `gh auth token` from the host
+#   OCR_BOX_PROFILE      name of a profile: $OCR_BOX_HOME/.env.NAME is read and its
+#                        variables passed into the box (same as --profile=NAME)
+#   OCR_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
+#   OCR_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+#   OCR_BOX_CPUS / OCR_BOX_MEMORY  VM sizing (default 4 / 4G)
+set -euo pipefail
+
+BOX_IMAGE="ocr-box"
+BOX_NAME_PREFIX="ocr"
+BOX_ENV_PREFIX="OCR_BOX"
+
+OCR_VERSION="${OCR_BOX_VERSION:-latest}"
+OCR_BOX_HOME="${OCR_BOX_HOME:-$HOME/.ocr-box}"
+BOX_HOME="$OCR_BOX_HOME"
+BOX_KEEP=(.opencodereview)
+
+# ----------------------------------------------------------------- lib ------
+# agent-box-lib.bash sits next to this script. Symlinks are followed, so
+# `ln -s .../tools/ocr-box ~/bin/ocr-box` still finds it.
+self="${BASH_SOURCE[0]}"
+while [[ -L $self ]]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ $self == /* ]] || self="$dir/$self"
+done
+dir="$(cd -P "$(dirname "$self")" && pwd)"
+[[ -r "$dir/agent-box-lib.bash" ]] || {
+  echo "error: agent-box-lib.bash not found next to $dir/$(basename "$self")" >&2
+  exit 1
+}
+# shellcheck source=agent-box-lib.bash
+source "$dir/agent-box-lib.bash"
+
+# ---------------------------------------------------------------- flags -----
+REBUILD=0
+BUILD_ONLY=0
+CLEAN=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --rebuild)
+    REBUILD=1
+    shift
+    ;;
+  --build-only)
+    BUILD_ONLY=1
+    shift
+    ;;
+  --clean)
+    CLEAN=keep
+    shift
+    ;;
+  --clean-all)
+    CLEAN=all
+    shift
+    ;;
+  --ssh)
+    # Not dead: the lib reads it back as `box_knob SSH`, i.e. indirectly
+    # through BOX_ENV_PREFIX, which shellcheck can't follow.
+    # shellcheck disable=SC2034
+    OCR_BOX_SSH=1
+    shift
+    ;;
+  --profile=*)
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
+    # shellcheck disable=SC2034
+    OCR_BOX_PROFILE="${1#--profile=}"
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  *) break ;; # everything else goes to ocr
+  esac
+done
+
+# ------------------------------------------------------------- helpers ------
+box_dockerfile_agent() {
+  cat <<EOF
+# No --ignore-scripts: the launcher resolves a per-platform native binary from
+# the package's optional dependencies at install time.
+RUN npm install -g @alibaba-group/open-code-review@${OCR_VERSION} \\
+ && npm cache clean --force
+
+# /root as a whole is the persisted mount, so ocr's own default location
+# (~/.opencodereview: config, rule.json, sessions) already lands in it.
+
+ENTRYPOINT ["ocr"]
+EOF
+}
+
+# ocr reviews with one model, named by OCR_LLM_MODEL. Default it to the first
+# model the server serves, so a bare `ocr-box review` works out of the box.
+default_model() {
+  : "${OCR_BOX_LOCAL_URL:?set OCR_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+  : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
+  OCR_URL="$OCR_BOX_LOCAL_URL" LOCAL_LLM_API_KEY="$LOCAL_LLM_API_KEY" python3 - <<'PYEOF'
+import json, os, sys, urllib.request
+base = os.environ["OCR_URL"].rstrip("/")
+root = base[:-3] if base.endswith("/v1") else base
+req = urllib.request.Request(f"{root}/model/info",
+                             headers={"Authorization": f"Bearer {os.environ['LOCAL_LLM_API_KEY']}"})
+try:
+    data = json.load(urllib.request.urlopen(req, timeout=15))["data"]
+except Exception as e:
+    sys.exit(f"error: could not fetch {root}/model/info: {e}; or set OCR_BOX_MODEL")
+if not data:
+    sys.exit("error: the server reported no models")
+print(data[0]["model_name"])
+PYEOF
+}
+
+# ---------------------------------------------------------------- main ------
+if [[ -n $CLEAN ]]; then
+  box_clean "$CLEAN"
+  exit 0
+fi
+
+box_require_runtime
+box_ensure_image "$REBUILD" "$BUILD_ONLY" "ocr@$OCR_VERSION"
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+: "${OCR_BOX_LOCAL_URL:?set OCR_BOX_LOCAL_URL, e.g. https://llm.example.com/v1}"
+: "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
+OCR_LLM_MODEL="${OCR_BOX_MODEL:-$(default_model)}"
+# Exported rather than passed by value: `--env NAME` inherits it, keeping the
+# key out of the host's process list.
+OCR_LLM_TOKEN="$LOCAL_LLM_API_KEY"
+export OCR_LLM_MODEL OCR_LLM_TOKEN
+
+box_docker_bridge
+
+# not exec: the socat trap must outlive ocr
+box_run_args
+container run "${BOX_RUN_ARGS[@]}" \
+  --env "OCR_LLM_URL=$OCR_BOX_LOCAL_URL" \
+  --env "OCR_LLM_PROTOCOL=${OCR_LLM_PROTOCOL:-openai}" \
+  --env OCR_LLM_MODEL \
+  --env OCR_LLM_TOKEN \
+  --env OCR_LLM_TIMEOUT \
+  "$BOX_IMAGE" "$@"
