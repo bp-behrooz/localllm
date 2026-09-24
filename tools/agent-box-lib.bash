@@ -185,36 +185,43 @@ box_clean() {
 
 # ------------------------------------------------------------ host alias -----
 box_ensure_host_alias() {
-  # Apple's localhost domain installs a pf rule that does not survive a reboot,
-  # while `dns list` keeps showing the domain. So: redo the setup (needs sudo)
-  # once per boot, tracked by kernel boot time.
-  local alias="$1" ip
+  # A "localhost domain" is two host-side things: /etc/resolver/containerization.<domain>
+  # and a pf rdr rule in the com.apple/container anchor. The resolver file survives a
+  # reboot, the pf rule doesn't — hence the once-per-boot check, tracked by kernel boot
+  # time and shared by all the *-box scripts. Neither touches the container runtime, so
+  # there is nothing to restart and other boxes keep running.
+  local alias="$1" ip resolver anchor
   ip="$(box_knob HOST_ALIAS_IP 203.0.113.113)"
-  # Shared between all the *-box scripts so only one of them does this per boot.
+  resolver="/etc/resolver/containerization.$alias"
+  anchor="/etc/pf.anchors/com.apple.container"
   local stamp="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot" boot
   boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
-  if [[ -f "$stamp" && "$(cat "$stamp")" == "$boot" ]] &&
-    container system dns list 2>/dev/null | grep -q "^$alias\b"; then
+
+  # `dns create --localhost <ip>` writes "options localhost:<ip>" into the resolver
+  # file, so that line means the domain is configured for the IP we want — the same
+  # predicate gates both the fast path and the reload-vs-setup choice below, so a
+  # changed ${BOX_ENV_PREFIX}_HOST_ALIAS_IP can't be missed within a boot.
+  local configured=0
+  if [[ -f "$resolver" && -f "$anchor" ]] && grep -qF "localhost:$ip" "$resolver"; then
+    configured=1
+  fi
+
+  if [[ $configured -eq 1 && -f "$stamp" && "$(cat "$stamp")" == "$boot" ]]; then
     return 0
   fi
 
-  echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
-  sudo container system dns delete "$alias" >/dev/null 2>&1 || true
-  sudo container system dns create "$alias" --localhost "$ip"
-
-  # The runtime needs a restart to pick up the change. Don't yank it out from
-  # under running containers (ours or anyone else's). The buildkit builder
-  # doesn't count: the runtime starts it on demand for the next build, and it's
-  # left running after our own image build, so it would block this forever.
-  if [[ -n "$(container list --quiet 2>/dev/null | grep -v '^buildkit')" ]]; then
-    echo "error: containers are running, so the runtime can't be restarted to pick up the change." >&2
-    echo "       When they're done:  container system stop && container system start" >&2
-    echo "       then relaunch." >&2
-    exit 1
+  if [[ $configured -eq 1 ]]; then
+    # Only the pf rule can be stale. Reload it — `dns delete`+`create` would tear the
+    # domain down and HUP mDNSResponder, a DNS blip for everything else on the Mac.
+    echo "==> reloading the '$alias' pf rule (sudo, once per boot)" >&2
+    sudo /sbin/pfctl -a com.apple/container -f "$anchor"
   else
-    container system stop >/dev/null 2>&1 || true
-    container system start
+    echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
+    sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+    sudo container system dns create "$alias" --localhost "$ip"
   fi
+  # Only reached if the sudo above succeeded: every box script runs with `set -e`,
+  # so a failure aborts before the stamp is written and the next launch retries.
   mkdir -p "$(dirname "$stamp")"
   printf '%s' "$boot" >"$stamp"
 }
