@@ -128,6 +128,24 @@ A persisted home grows — runtimes, package caches, build artifacts.
 installs, `~/.npm`, `~/.cargo` and friends, but not your login or history. Both
 print the directory's size before they touch it.
 
+## The once-per-boot sudo
+
+The first launch after a boot sets up the Mac-loopback DNS domain
+(`*_BOX_HOST_ALIAS`) — an `/etc/resolver` file plus a `pf` rule — which needs
+`sudo`. It is tracked by kernel boot time and shared by all the boxes, so only
+the first box of a boot prompts; the rest reuse it. If that one prompt bugs
+you, allow the exact reload command without a password:
+
+```sh
+echo "$USER ALL=(root) NOPASSWD: /sbin/pfctl -a com.apple/container -f /etc/pf.anchors/com.apple.container" | sudo tee /etc/sudoers.d/container-pfctl
+sudo visudo -c -f /etc/sudoers.d/container-pfctl
+```
+
+The second line validates the syntax (if it errors, `sudo rm
+/etc/sudoers.d/container-pfctl`). The entry matches only that one command with
+those exact args — it does not grant passwordless `pfctl` in general. The rare
+first-ever `container system dns` setup still prompts.
+
 ## Flags
 
 Shared by all four: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
