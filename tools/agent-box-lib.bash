@@ -351,6 +351,12 @@ box_run_args() {
     --env "MISE_TRUSTED_CONFIG_PATHS=$PWD"
     --env MISE_YES=1
   )
+  # The VM does not inherit the host terminal. Agents then think they are on a
+  # dumb tty (Gemini warns "256-color support not detected"). Escape codes are
+  # rendered by the host, so advertise a 256-color/truecolor terminal.
+  local term="${TERM:-xterm-256color}"
+  [[ $term == *256color* || $term == *direct* ]] || term=xterm-256color
+  BOX_RUN_ARGS+=(--env "TERM=$term" --env "COLORTERM=${COLORTERM:-truecolor}")
   BOX_RUN_ARGS+=(
     ${BOX_DOCKER_ENV[@]+"${BOX_DOCKER_ENV[@]}"}
     ${BOX_GIT_ENV[@]+"${BOX_GIT_ENV[@]}"}
