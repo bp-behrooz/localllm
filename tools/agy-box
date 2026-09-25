@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# agy-box: run Antigravity CLI in an Apple `container` VM confined to $PWD,
+# with all permissions granted (the VM is the sandbox).
+#
+# The replacement for Gemini CLI on Google AI Pro / Ultra / free accounts
+# (those stopped being served by `gemini` on 2026-06-18). Talks to Google,
+# unrelated to this repo's server. https://antigravity.google/docs/cli/overview
+#
+#   agy-box [agy args...]        run (builds the image on first use)
+#   agy-box --rebuild [args...]  delete existing image, rebuild, then run
+#   agy-box --build-only         (re)build the image and exit
+#   agy-box --ssh [args...]      forward your ssh-agent into the box, and pass the
+#                                host's gh token along (same as AGY_BOX_SSH=1)
+#   agy-box --profile=NAME       read $AGY_BOX_HOME/.env.NAME and pass its variables
+#                                into the box (same as AGY_BOX_PROFILE)
+#   agy-box --clean              drop the box's runtimes and caches, keep its login
+#   agy-box --clean-all          delete AGY_BOX_HOME entirely (asks first)
+#
+# Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
+# and agent-box-lib.bash sitting next to this script.
+#
+# First run: the VM has no browser and no keyring, so agy prints a URL. Open it
+# on the Mac, sign in with the Pro account, paste the code back. The token lands
+# in AGY_BOX_HOME (.gemini/antigravity-cli/). Alias agy=agy-box so that is the
+# command you resume with.
+#
+# AGY_BOX_HOME is the box's entire /root, so anything the agent installs into the
+# home directory survives the container being thrown away: mise runtimes, gems,
+# ~/.npm, ~/.cargo, shell history. System packages (apt) are not covered — those
+# still belong in the image. --clean empties it again.
+#
+# Every launch pre-trusts $PWD (the only folder the box sees), so there is no
+# trust prompt. The first launch also installs the default plugins (ponytail).
+#
+# Language runtimes come from mise: its shims are on PATH, so a project's own
+# mise.toml applies in the non-interactive shells the agent runs commands in.
+# See tools/README.md for the customization options.
+#
+# Env knobs:
+#   AGY_BOX_HOME        host dir for the box's config/state (default ~/.agy-box)
+#   AGY_BOX_YOLO        0 to keep agy's own approval prompts (default 1:
+#                       toolPermission and artifactReviewPolicy always-proceed)
+#   GEMINI_API_KEY      passed through if set, never written to disk. On its own
+#                       it does nothing; agy only uses it when settings.json has
+#                       "modelProvider": "gemini" (set that yourself to skip login)
+#   GOOGLE_GEMINI_BASE_URL  passed through if set
+#   AGY_BOX_CPUS / AGY_BOX_MEMORY  VM sizing (default 4 / 4G)
+#   AGY_BOX_SSH         1: forward your ssh-agent into the box (container run --ssh)
+#                       and, so `gh` works too, pass `gh auth token` from the host
+#   AGY_BOX_PROFILE     name of a profile: $AGY_BOX_HOME/.env.NAME is read and its
+#                       variables passed into the box (same as --profile=NAME)
+#   AGY_BOX_DOCKER      1: let the agent use your Mac's Docker engine
+#   AGY_BOX_DOCKER_SOCK path to the Docker socket (auto-detected; colima first)
+#   AGY_BOX_HOST_ALIAS  the localhost domain name (default host.container.internal)
+#   AGY_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+set -euo pipefail
+
+BOX_IMAGE="agy-box"
+BOX_NAME_PREFIX="agy"
+BOX_ENV_PREFIX="AGY_BOX"
+
+AGY_BOX_HOME="${AGY_BOX_HOME:-$HOME/.agy-box}"
+BOX_HOME="$AGY_BOX_HOME"
+BOX_KEEP=(.gemini)
+
+# ----------------------------------------------------------------- lib ------
+self="${BASH_SOURCE[0]}"
+while [[ -L $self ]]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ $self == /* ]] || self="$dir/$self"
+done
+dir="$(cd -P "$(dirname "$self")" && pwd)"
+[[ -r "$dir/agent-box-lib.bash" ]] || {
+  echo "error: agent-box-lib.bash not found next to $dir/$(basename "$self")" >&2
+  exit 1
+}
+# shellcheck source=agent-box-lib.bash
+source "$dir/agent-box-lib.bash"
+
+# ---------------------------------------------------------------- flags -----
+REBUILD=0
+BUILD_ONLY=0
+CLEAN=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --rebuild)
+    REBUILD=1
+    shift
+    ;;
+  --build-only)
+    BUILD_ONLY=1
+    shift
+    ;;
+  --clean)
+    CLEAN=keep
+    shift
+    ;;
+  --clean-all)
+    CLEAN=all
+    shift
+    ;;
+  --ssh)
+    # shellcheck disable=SC2034
+    AGY_BOX_SSH=1
+    shift
+    ;;
+  --profile=*)
+    # shellcheck disable=SC2034
+    AGY_BOX_PROFILE="${1#--profile=}"
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  *) break ;;
+  esac
+done
+
+# ------------------------------------------------------------- helpers ------
+box_dockerfile_agent() {
+  cat <<'EOF'
+# Native binary, not npm. --dir keeps it out of the persisted home so --clean
+# cannot delete the agent. With no D-Bus in the VM, agy stores its token in a
+# file under ~/.gemini, and with no browser it shows the paste-a-code login.
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin
+
+# The binary lives in the image. A background self-update would rewrite it and
+# be thrown away with the container.
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
+
+ENTRYPOINT ["agy"]
+EOF
+}
+
+ensure_settings() {
+  # The VM is the boundary: no nested sandbox, $PWD trusted up front (it's all
+  # the box can see), and (unless AGY_BOX_YOLO=0) no approval prompts. Leaves
+  # modelProvider and every other key alone.
+  mkdir -p "$AGY_BOX_HOME/.gemini/antigravity-cli"
+  AGY_BOX_YOLO="${AGY_BOX_YOLO:-1}" \
+    python3 - "$AGY_BOX_HOME/.gemini/antigravity-cli/settings.json" "$PWD" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+s = json.loads(p.read_text()) if p.is_file() else {}
+before = json.dumps(s, sort_keys=True)
+s["enableTerminalSandbox"] = False
+s["altScreenMode"] = "always"
+s["runningLightSpeed"] = "off"
+trusted = s.setdefault("trustedWorkspaces", [])
+if sys.argv[2] not in trusted:
+    trusted.append(sys.argv[2])
+if os.environ["AGY_BOX_YOLO"] == "1":
+    s["toolPermission"] = "always-proceed"
+    s["artifactReviewPolicy"] = "always-proceed"
+if json.dumps(s, sort_keys=True) != before:
+    p.write_text(json.dumps(s, indent=2) + "\n")
+PYEOF
+}
+
+# ---------------------------------------------------------------- main ------
+if [[ -n $CLEAN ]]; then
+  box_clean "$CLEAN"
+  exit 0
+fi
+
+box_require_runtime
+box_ensure_image "$REBUILD" "$BUILD_ONLY" "agy"
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+ensure_settings
+box_docker_bridge
+box_run_args
+
+# Default plugins. They live in the persisted home, so this runs once (and
+# again after --clean-all).
+PLUGINS=(https://github.com/DietrichGebert/ponytail)
+for url in "${PLUGINS[@]}"; do
+  [[ -d "$AGY_BOX_HOME/.gemini/config/plugins/$(basename "$url")" ]] ||
+    container run "${BOX_RUN_ARGS[@]}" "$BOX_IMAGE" plugin install "$url"
+done
+
+AUTH_ENV=()
+for v in GEMINI_API_KEY GOOGLE_GEMINI_BASE_URL; do
+  [[ -n ${!v-} ]] && AUTH_ENV+=(--env "$v")
+done
+
+# not exec: the socat trap must outlive agy
+container run "${BOX_RUN_ARGS[@]}" \
+  ${AUTH_ENV[@]+"${AUTH_ENV[@]}"} \
+  "$BOX_IMAGE" "$@"

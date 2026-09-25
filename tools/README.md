@@ -1,11 +1,12 @@
 # The agent boxes
 
-Four scripts that run a coding agent inside an Apple `container` VM confined to
+Five scripts that run a coding agent inside an Apple `container` VM confined to
 `$PWD`, so the agent can be given every permission and the VM is the boundary:
 
 | script | agent |
 |---|---|
 | [`claude-box`](claude-box) | Claude Code (talks to Anthropic; unrelated to this repo's server) |
+| [`agy-box`](agy-box) | Antigravity CLI (`agy`, talks to Google; unrelated to this repo's server). The successor to Gemini CLI for Google AI Pro / Ultra / free accounts |
 | [`pi-box`](pi-box) | the pi coding agent, against [the local LLM server](../README.md) |
 | [`opencode-box`](opencode-box) | OpenCode, against [the local LLM server](../README.md) |
 | [`ocr-box`](ocr-box) | Open Code Review (`ocr`), against [the local LLM server](../README.md) — reviews a diff or scans whole files; not an interactive agent, so `ocr-box review`, `ocr-box scan`, … |
@@ -17,6 +18,11 @@ copy sitting next to it, so keep the two together when you copy a box
 somewhere.
 
 Requires Apple Silicon, macOS 26 and `brew install container`.
+
+The two that talk to a vendor sign in on first launch. claude-box logs in as
+usual. agy-box has no browser in the VM, so it prints a URL: open it on the
+Mac, sign in, paste the code back. Both logins land in the box's home and
+survive `--clean`.
 
 ## Customizing a box
 
@@ -63,6 +69,7 @@ The box's home directory on the Mac is mounted as the container's entire
 | box | host dir | keeps |
 |---|---|---|
 | `claude-box` | `~/.claude-box` | `.claude/` — login, settings, `CLAUDE.md`, history |
+| `agy-box` | `~/.agy-box` | `.gemini/` — login, settings, plugins, conversations |
 | `pi-box` | `~/.pi-box` | `.pi/` — config, models, sessions |
 | `opencode-box` | `~/.opencode-box` | `.config/opencode/`, `.local/share/opencode/` |
 | `ocr-box` | `~/.ocr-box` | `.opencodereview/` — config, `rule.json`, review sessions |
@@ -77,12 +84,13 @@ with the container. System packages belong in the image (below).
 ### 3. Per-launch behavior: env knobs
 
 Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box,
-`PI_BOX_` for pi-box, `OC_BOX_` for opencode-box, `OCR_BOX_` for ocr-box:
+`AGY_BOX_` for agy-box, `PI_BOX_` for pi-box, `OC_BOX_` for opencode-box,
+`OCR_BOX_` for ocr-box:
 
 | knob | does |
 |---|---|
 | `*_BOX_HOME` | where the box's `/root` lives on the Mac |
-| `*_BOX_VERSION` | npm version/tag of the agent itself |
+| `*_BOX_VERSION` | npm version/tag of the agent itself (not agy-box: its installer always fetches the latest, so `--rebuild` to update) |
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM sizing (default 4 / 4G) |
 | `*_BOX_SSH` | forward your ssh-agent in, and pass `gh auth token` along |
 | `*_BOX_PROFILE` | read the box home's `.env.<name>` (lines like `export SOME_VAR=SOME_VAL`) and pass its variables in |
@@ -92,7 +100,9 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 
 Each script's header documents its own knobs on top of these — model defaults
 and provider hiding for pi-box and opencode-box, the review model for ocr-box,
-renderer and mouse handling for claude-box.
+renderer and mouse handling for claude-box, approval prompts for claude-box and
+agy-box (both off by default; the VM is the boundary). agy-box also trusts
+`$PWD` up front and installs its default plugins (ponytail) on first launch.
 
 Two knobs carry no prefix, because they name this repo's server rather than a
 box: `LOCAL_LLM_URL` (the OpenAI-compatible base URL) and `LOCAL_LLM_API_KEY`.
@@ -104,8 +114,7 @@ Point one box elsewhere with `LOCAL_LLM_URL=… ./tools/pi-box`.
 Adding an apt package, or anything else that lives outside `$HOME`, means
 editing `box_dockerfile_base` in [`agent-box-lib.bash`](agent-box-lib.bash) —
 there is no per-user config file for this yet, so the change is shared by all
-four boxes. Then
-rebuild each box you want it in:
+the boxes. Then rebuild each box you want it in:
 
 ```bash
 ./tools/claude-box --build-only   # reuses cached layers above the change
@@ -148,9 +157,10 @@ first-ever `container system dns` setup still prompts.
 
 ## Flags
 
-Shared by all four: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
-`--clean`, `--clean-all`, `--sync`, `--sync-only`. The `--sync` flags re-read
-the served model list from the LLM server and rewrite the box's config —
+Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
+`--clean`, `--clean-all`. The boxes that use this repo's server (pi-box,
+opencode-box, ocr-box) add `--sync` and `--sync-only`, which re-read the served
+model list from the LLM server and rewrite the box's config —
 pi-box and opencode-box record context limits too, ocr-box writes a `localllm`
 provider (reviewing with `OCR_BOX_MODEL`, default: the first model the server
 reports). Everything else is passed through to the agent.
@@ -163,14 +173,14 @@ flag away without exporting anything in your own shell.
 ## Resuming a session
 
 Each agent prints its own resume hint as it exits — `pi --session <id>`,
-`claude --resume <id>`, `opencode -s <id>` — naming a command that doesn't
+`claude --resume <id>`, `opencode -s <id>`, `agy --conversation=<id>` — naming a command that doesn't
 exist on the Mac, because only the `*-box` wrappers do. Give the wrappers those
 names and every hint an agent ever prints becomes copy-pasteable, for any
 session and any flag:
 
 ```bash
-alias pi=pi-box claude=claude-box opencode=opencode-box   # in your shell rc
-ln -s /path/to/tools/pi-box ~/bin/pi                      # or on PATH instead
+alias pi=pi-box claude=claude-box opencode=opencode-box agy=agy-box   # in your shell rc
+ln -s /path/to/tools/pi-box ~/bin/pi                                  # or on PATH instead
 ```
 
 Aliases apply to your interactive shell, which is exactly where you paste the

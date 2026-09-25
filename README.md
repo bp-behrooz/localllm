@@ -15,7 +15,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 |---|---|
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool/pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
-| [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode / Open Code Review against this server, plus Claude Code (unrelated — it talks to Anthropic as usual). Persistence, mise and customization documented there |
+| [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode / Open Code Review against this server, plus Claude Code and Antigravity CLI (unrelated — they talk to Anthropic / Google as usual). Persistence, mise and customization documented there |
 | `pool/test.sh` | self-test: bootstraps a local `.venv` and runs `pool.py --test` (no GPUs needed) |
 
 ## Requirements
@@ -167,7 +167,7 @@ that `ocr` prefers over any environment, reviewing with `OCR_BOX_MODEL`
 (default: the first model the server reports).
 
 Worth doing once: alias the boxes to the agents' own names
-(`alias pi=pi-box claude=claude-box opencode=opencode-box`), so the resume hint
+(`alias pi=pi-box claude=claude-box opencode=opencode-box agy=agy-box`), so the resume hint
 each agent prints as it exits — `pi --session <id>` — is copy-pasteable.
 See [Resuming a session](tools/README.md#resuming-a-session).
 
