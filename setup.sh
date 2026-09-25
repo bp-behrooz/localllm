@@ -88,9 +88,25 @@ LLAMA_BIN="$(command -v llama-server)"
 # ---------- one-time provisioning (idempotent, skipped when done) ----------
 id localllm &>/dev/null || useradd -r -m -d /opt/localllm -s "$(command -v nologin)" localllm
 usermod -aG render,video localllm
-# cmd presets that launch containers need the runtime; docker group is root-equivalent,
-# but this user already owns the GPUs and everything under /opt/localllm
-getent group docker >/dev/null && usermod -aG docker localllm
+# cmd presets run their containers under rootless podman as this user: no daemon,
+# no root-equivalent docker group, and what a container writes stays localllm-owned.
+# It needs its own subuid/subgid range (placed after every existing one) and a
+# lingering user manager for /run/user/<uid>.
+command -v podman >/dev/null || echo "warning: podman not found; cmd presets need it (pacman -S podman)"
+id -nG localllm | grep -qw docker && gpasswd -d localllm docker
+for f in subuid subgid; do # podman needs both; check each on its own
+  grep -q '^localllm:' "/etc/$f" 2>/dev/null && continue
+  sub=$({ cat /etc/subuid /etc/subgid 2>/dev/null || true; } |
+    awk -F: '$2+$3>m{m=$2+$3} END{print (m>100000?m:100000)}')
+  usermod "--add-${f}s" "$sub-$((sub + 65535))" localllm
+done
+loginctl enable-linger localllm
+# docker resolves a short image name (radiance's stilldeadcode/vllm-radiance) to
+# Docker Hub; podman only does with a search registry set. Per-user drop-in, so
+# the host's own registries.conf stays as it is.
+mkdir -p /opt/localllm/.config/containers/registries.conf.d
+echo 'unqualified-search-registries = ["docker.io"]' \
+  >/opt/localllm/.config/containers/registries.conf.d/50-dockerhub.conf
 [[ -x /opt/localllm/venv/bin/uvicorn ]] || {
   [[ -d /opt/localllm/venv ]] || python3 -m venv /opt/localllm/venv
   /opt/localllm/venv/bin/pip install -q --upgrade pip -r "$(dirname "$0")/pool/requirements.txt"
@@ -128,19 +144,26 @@ chmod 600 /opt/localllm/env
 } >/opt/localllm/pool.json
 install -m 644 "$(dirname "$0")/pool/pool.py" /opt/localllm/pool.py
 
-chown -R localllm:localllm /opt/localllm
+# not podman's storage: its image layers are owned by localllm's subuids
+find /opt/localllm -path /opt/localllm/.local/share/containers -prune \
+  -o -exec chown -h localllm:localllm {} +
 chmod 600 /opt/localllm/env
 
 # ---------- systemd units ----------
 systemctl stop localllm 2>/dev/null || true
 
-cat >/etc/systemd/system/localllm.service <<'EOF'
+uid=$(id -u localllm)
+cat >/etc/systemd/system/localllm.service <<EOF
 [Unit]
 Description=localllm GPU pool server
+# rootless podman (cmd presets) wants the user's runtime dir and systemd bus
+Wants=user@$uid.service
+After=user@$uid.service
 
 [Service]
 User=localllm
 EnvironmentFile=/opt/localllm/env
+Environment=XDG_RUNTIME_DIR=/run/user/$uid
 WorkingDirectory=/opt/localllm
 ExecStart=/opt/localllm/venv/bin/python /opt/localllm/pool.py
 Restart=on-failure

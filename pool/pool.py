@@ -82,9 +82,10 @@ class Instance:
         if "cmd" in preset:
             # custom engine (e.g. radiance/vLLM): the command reads PORT / GPUS /
             # NAME from the environment and must serve /health and /v1 on PORT.
-            # ponytail: stop() SIGTERMs the launcher (docker forwards it); a
+            # ponytail: stop() SIGTERMs the launcher (podman forwards it); a
             # kill -9 fallback can orphan a container -- the fixed NAME lets the
-            # next spawn of the same preset docker-rm it.
+            # preset's launcher replace it on the next spawn (radiance does, with
+            # podman run --replace).
             env.update(PORT=str(self.port), GPUS=gpu_list,
                        GPU_IDS=gpu_list, NAME=f"pool-{name}-{self.port}")
             cmd = ["bash", "-c", preset["cmd"]]

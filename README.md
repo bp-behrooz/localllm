@@ -131,17 +131,29 @@ The preloaded preset serves Qwen3.8-27B in native MXFP4 through
 [radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)
 (vLLM with RDNA4 kernels + speculative decoding; ~6× llama.cpp's dense-model
 speed on the same cards). It's a `cmd` preset, so the radiance checkout is a
-one-time manual install — as the `localllm` user, under its home:
+one-time manual install, as the `localllm` user, under its home. It runs on
+rootless podman: no daemon, no root-equivalent `docker` group, and the
+checkpoints and caches stay `localllm`-owned. `setup.sh` gives `localllm` a
+subuid range and a lingering user manager, so run it first:
 
 ```bash
+sudo pacman -S podman
+sudo ./setup.sh
 sudo git clone https://codeberg.org/ggz14/radiance-vllm-mxfp4 /opt/localllm/radiance
 sudo chown -R localllm:localllm /opt/localllm/radiance
-sudo -u localllm env HOME=/opt/localllm ASSUME_YES=1 /opt/localllm/radiance/setup-mxfp4.sh
-sudo ./setup.sh
+cd /opt/localllm   # podman must start in a dir localllm can enter
+sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
+  ASSUME_YES=1 /opt/localllm/radiance/setup-mxfp4.sh
+sudo systemctl restart localllm
 ```
 
-`setup-mxfp4.sh` pulls the ~40 GiB image + checkpoints into `/opt/localllm`
-(the pool user is added to the `docker` group by `setup.sh`). Cold start is
+`setup-mxfp4.sh` pulls the ~40 GiB image + checkpoints into `/opt/localllm`.
+Radiance picks podman over docker whenever both are installed. Coming from
+the old docker setup: after the steps above (which also drop `localllm` from
+the `docker` group and re-own the root-owned caches), free the old image with
+`sudo docker system prune -a`, and if nothing else on the box needs it,
+`sudo systemctl disable --now docker.socket docker.service` and
+`sudo pacman -Rns docker`. Cold start is
 slower than a llama-server preset — engine init plus, on the very first run,
 kernel compilation. Delete the preset from the table (and `PRELOAD`) if you
 don't want any of this; nothing else depends on it.
