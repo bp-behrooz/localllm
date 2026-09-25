@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# agy-box: run Antigravity CLI in an Apple `container` VM confined to $PWD,
-# with all permissions granted (the VM is the sandbox).
+# agy-box: run Antigravity CLI in a `container` VM (podman on Linux) confined to
+# $PWD, with all permissions granted (the container is the sandbox).
 #
 # The replacement for Gemini CLI on Google AI Pro / Ultra / free accounts
 # (those stopped being served by `gemini` on 2026-06-18). Talks to Google,
@@ -17,10 +17,11 @@
 #   agy-box --clean-all          delete AGY_BOX_HOME entirely (asks first)
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
-# and agent-box-lib.bash sitting next to this script.
+# or Linux with rootless podman (see tools/README.md), and agent-box-lib.bash
+# sitting next to this script.
 #
-# First run: the VM has no browser and no keyring, so agy prints a URL. Open it
-# on the Mac, sign in with the Pro account, paste the code back. The token lands
+# First run: the box has no browser and no keyring, so agy prints a URL. Open it
+# on the host, sign in with the Pro account, paste the code back. The token lands
 # in AGY_BOX_HOME (.gemini/antigravity-cli/). Alias agy=agy-box so that is the
 # command you resume with.
 #
@@ -183,7 +184,7 @@ box_run_args
 PLUGINS=(https://github.com/DietrichGebert/ponytail)
 for url in "${PLUGINS[@]}"; do
   [[ -d "$AGY_BOX_HOME/.gemini/config/plugins/$(basename "$url")" ]] ||
-    container run "${BOX_RUN_ARGS[@]}" "$BOX_IMAGE" plugin install "$url"
+    box_run "${BOX_RUN_ARGS[@]}" "$BOX_IMAGE" plugin install "$url"
 done
 
 AUTH_ENV=()
@@ -192,6 +193,6 @@ for v in GEMINI_API_KEY GOOGLE_GEMINI_BASE_URL; do
 done
 
 # not exec: the socat trap must outlive agy
-container run "${BOX_RUN_ARGS[@]}" \
+box_run "${BOX_RUN_ARGS[@]}" \
   ${AUTH_ENV[@]+"${AUTH_ENV[@]}"} \
   "$BOX_IMAGE" "$@"

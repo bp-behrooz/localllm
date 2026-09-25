@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# opencode-box: run OpenCode in an Apple `container` VM confined to $PWD,
-# with all permissions granted (the VM is the sandbox).
+# opencode-box: run OpenCode in a `container` VM (podman on Linux) confined to
+# $PWD, with all permissions granted (the container is the sandbox).
 #
 #   opencode-box [opencode args...]  run (builds the image / syncs models on first use)
 #   opencode-box --rebuild [args...] delete existing image, rebuild, then run
@@ -26,7 +26,8 @@
 # See tools/README.md for the customization options.
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
-# and agent-box-lib.bash sitting next to this script.
+# or Linux with rootless podman (see tools/README.md), and agent-box-lib.bash
+# sitting next to this script.
 #
 # Env knobs:
 #   OC_BOX_VERSION      npm version/tag of opencode-ai (default "latest")
@@ -256,7 +257,7 @@ box_docker_bridge
 
 # not exec: the socat trap must outlive opencode
 box_run_args
-container run "${BOX_RUN_ARGS[@]}" \
+box_run "${BOX_RUN_ARGS[@]}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   "$BOX_IMAGE" "$@"

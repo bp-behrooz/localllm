@@ -3,6 +3,11 @@
 # image lifecycle, the Mac-loopback DNS domain, the Docker bridge, and the
 # `container run` flags they all pass.
 #
+# Two hosts run the same image: a Mac, through Apple's `container` CLI (a VM),
+# and Linux (Arch), through rootless podman — no VM, and the Mac-only machinery
+# (socat bridge, pf/DNS-domain, per-boot sudo) is skipped there. Everything
+# host-specific below branches on BOX_CTR.
+#
 # A library, not a program: it has no shebang, isn't executable, and each *-box
 # script sources the copy sitting next to it.
 #
@@ -31,6 +36,14 @@
   exit 1
 }
 
+# The host runtime: Apple's `container` CLI on a Mac, rootless podman on Linux
+# (setup in tools/README.md).
+if [[ $(uname -s) == Linux ]]; then
+  BOX_CTR=(podman)
+else
+  BOX_CTR=(container)
+fi
+
 # Read one of the shared knobs under the sourcing script's own prefix:
 # box_knob CPUS 4  ->  $CL_BOX_CPUS, or 4. Split in two steps so it behaves the
 # same on macOS's bash 3.2 as on a modern one.
@@ -42,6 +55,27 @@ box_knob() {
 
 # --------------------------------------------------------------- runtime -----
 box_require_runtime() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    command -v podman >/dev/null 2>&1 || {
+      echo "error: podman not found. Install with: sudo pacman -S podman" >&2
+      exit 1
+    }
+    # Rootful (sudo podman) would make everything the box writes root-owned on
+    # the host, which breaks the next launch's config sync and git inside the
+    # box. Rootless maps the box's root to your own uid.
+    local rootless
+    # stderr stays out: podman warns there (cgroup manager etc.) even when fine
+    rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" || {
+      echo "error: podman is not usable here; run \`podman info\` to see why" >&2
+      exit 1
+    }
+    [[ $rootless == true ]] || {
+      echo "error: podman is not rootless here; run the box as your own user (see tools/README.md)" >&2
+      exit 1
+    }
+    return 0
+  fi
+
   if ! command -v container >/dev/null 2>&1; then
     echo "error: 'container' CLI not found. Install with: brew install container" >&2
     exit 1
@@ -55,11 +89,24 @@ box_require_runtime() {
 
 # ----------------------------------------------------------------- image -----
 box_have_image() {
-  container image inspect "$BOX_IMAGE" >/dev/null 2>&1
+  "${BOX_CTR[@]}" image inspect "$BOX_IMAGE" >/dev/null 2>&1
 }
 
 box_remove_images() {
   local ids
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    ids=$(podman ps -a --format '{{.Names}}' 2>/dev/null |
+      grep "^$BOX_NAME_PREFIX-" || true)
+    for c in $ids; do
+      podman rm -f "$c" >/dev/null 2>&1 || true
+    done
+    if box_have_image; then
+      echo "==> removing image $BOX_IMAGE" >&2
+      podman image rm -f "$BOX_IMAGE" >/dev/null
+    fi
+    podman image prune -f >/dev/null 2>&1 || true
+    return 0
+  fi
   ids=$(container list --all --format json 2>/dev/null |
     grep -o "\"name\":\"$BOX_NAME_PREFIX-[^\"]*\"" | cut -d'"' -f4 || true)
   for c in $ids; do
@@ -76,7 +123,8 @@ box_remove_images() {
 # Dockerfile verbatim — no doubled backslashes, no escaped $(...).
 box_dockerfile_base() {
   cat <<'EOF'
-FROM ubuntu:26.04
+# fully qualified: podman won't guess a registry for a short name
+FROM docker.io/library/ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Node 22 ships in 26.04's repos, so no NodeSource needed
@@ -125,7 +173,7 @@ box_build_image() {
   } >"$ctx/Dockerfile"
 
   echo "==> building image $BOX_IMAGE${note:+ ($note)}" >&2
-  container build --tag "$BOX_IMAGE" "$ctx" || rc=$?
+  "${BOX_CTR[@]}" build --tag "$BOX_IMAGE" "$ctx" || rc=$?
   rm -rf "$ctx"
   return "$rc"
 }
@@ -185,6 +233,10 @@ box_clean() {
 
 # ------------------------------------------------------------ host alias -----
 box_ensure_host_alias() {
+  # macOS-only: on Linux the podman socket bind-mounts straight into the box
+  # (see box_docker_bridge), so there is no loopback domain to set up.
+  [[ ${BOX_CTR[0]} == container ]] || return 0
+
   # A "localhost domain" is two host-side things: /etc/resolver/containerization.<domain>
   # and a pf rdr rule in the com.apple/container anchor. The resolver file survives a
   # reboot, the pf rule doesn't — hence the once-per-boot check, tracked by kernel boot
@@ -228,26 +280,41 @@ box_ensure_host_alias() {
 
 # ---------------------------------------------------------------- docker -----
 box_docker_bridge() {
-  # Expose the Mac's Docker socket to the box. Unix sockets can't be bind-mounted
-  # into the VM, and containers can't reach the Mac at the bridge gateway IP by
-  # default. Apple's supported route is a "localhost" DNS domain: it installs a
-  # pf rule that redirects a chosen IP to the Mac's loopback, so we listen on
-  # 127.0.0.1 with socat and let the box connect by name.
+  # Expose the host's Docker to the box. On a Mac, Unix sockets can't be
+  # bind-mounted into the VM, and containers can't reach the Mac at the bridge
+  # gateway IP by default. Apple's supported route is a "localhost" DNS domain:
+  # it installs a pf rule that redirects a chosen IP to the Mac's loopback, so
+  # we listen on 127.0.0.1 with socat and let the box connect by name. On Linux
+  # none of that exists: podman's Docker-compatible socket mounts straight in,
+  # no socat, no sudo.
   #
-  # NOTE: whatever the daemon can reach on the Mac (colima: its mount list), the
+  # NOTE: whatever the daemon can reach on the host (colima: its mount list), the
   # agent can reach through docker.
   BOX_DOCKER_ENV=()
   [[ "$(box_knob DOCKER 0)" == "1" ]] || return 0
-  command -v socat >/dev/null || {
-    echo "error: ${BOX_ENV_PREFIX}_DOCKER needs socat (brew install socat)" >&2
-    exit 1
-  }
-
-  local alias
-  alias="$(box_knob HOST_ALIAS host.container.internal)"
-  box_ensure_host_alias "$alias"
-
   local sock
+
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    sock="$(box_knob DOCKER_SOCK)"
+    if [[ -z "$sock" ]]; then
+      # the user's podman API socket, socket-activated by systemd
+      sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+      [[ -S "$sock" ]] || systemctl --user start podman.socket 2>/dev/null || true
+    fi
+    # podman's Docker API has no BuildKit; the box's docker CLI would reach for
+    # buildx and fail, so pin `docker build` to the classic builder.
+    [[ $(basename "$sock") == podman.sock ]] && BOX_DOCKER_ENV=(--env DOCKER_BUILDKIT=0)
+    [[ -S "$sock" ]] || {
+      echo "error: no Docker socket found at $sock" >&2
+      echo "       systemctl --user enable --now podman.socket, or set ${BOX_ENV_PREFIX}_DOCKER_SOCK" >&2
+      exit 1
+    }
+    # The image's docker CLI already defaults to unix:///var/run/docker.sock.
+    BOX_DOCKER_ENV+=(--volume "$sock:/var/run/docker.sock")
+    echo "==> docker: $sock -> /var/run/docker.sock (this session only)" >&2
+    return 0
+  fi
+
   sock="$(box_knob DOCKER_SOCK)"
   if [[ -z "$sock" ]]; then
     for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
@@ -262,6 +329,15 @@ box_docker_bridge() {
     echo "error: no Docker socket found; set ${BOX_ENV_PREFIX}_DOCKER_SOCK" >&2
     exit 1
   }
+
+  command -v socat >/dev/null || {
+    echo "error: ${BOX_ENV_PREFIX}_DOCKER needs socat (brew install socat)" >&2
+    exit 1
+  }
+
+  local alias
+  alias="$(box_knob HOST_ALIAS host.container.internal)"
+  box_ensure_host_alias "$alias"
 
   local port=$((20000 + RANDOM % 20000))
   socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
@@ -339,7 +415,8 @@ box_run_args() {
   mkdir -p "$BOX_HOME"
   BOX_RUN_ARGS=(
     -it --rm
-    --name "$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.-\n' '-')-$$"
+    # trailing '-' so GNU tr doesn't read "_.-\n" as a (reversed) range
+    --name "$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.\n-' '-')-$$"
     --volume "$PWD:$PWD"
     --workdir "$PWD"
     --volume "$BOX_HOME:/root"
@@ -364,6 +441,23 @@ box_run_args() {
     ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
   if [[ -n "$(box_knob SSH)" ]]; then
-    BOX_RUN_ARGS+=(--ssh)
+    if [[ ${BOX_CTR[0]} == podman ]]; then
+      # podman has no --ssh; mount the agent socket at a fixed path instead.
+      [[ -S "${SSH_AUTH_SOCK:-}" ]] || {
+        echo "error: --ssh needs a running ssh-agent (SSH_AUTH_SOCK)" >&2
+        exit 1
+      }
+      BOX_RUN_ARGS+=(--volume "$SSH_AUTH_SOCK:/ssh-agent.sock"
+        --env SSH_AUTH_SOCK=/ssh-agent.sock)
+    else
+      BOX_RUN_ARGS+=(--ssh)
+    fi
   fi
+}
+
+# Launch the image under whatever runtime the host has. Everything else about
+# the invocation is host-independent, so the *-box scripts call this instead of
+# naming the CLI.
+box_run() {
+  "${BOX_CTR[@]}" run "$@"
 }

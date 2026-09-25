@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# claude-box: run Claude Code in an Apple `container` VM confined to $PWD,
-# with all permissions granted (the VM is the sandbox).
+# claude-box: run Claude Code in a `container` VM (podman on Linux) confined to
+# $PWD, with all permissions granted (the container is the sandbox).
 #
 # Unrelated to the rest of this repo: it talks to Anthropic as usual, the box
 # is only here for the sandboxing.
@@ -17,7 +17,8 @@
 #   claude-box --clean-all         delete CL_BOX_HOME entirely (asks first)
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
-# and agent-box-lib.bash sitting next to this script.
+# or Linux with rootless podman (see tools/README.md), and agent-box-lib.bash
+# sitting next to this script.
 #
 # First run: log in inside the box (`/login`, or set ANTHROPIC_API_KEY); the
 # credentials land in CL_BOX_HOME and are reused after that.
@@ -227,7 +228,7 @@ esac
 # its Mac path, so it stays separate per project.
 # not exec: the socat trap must outlive claude
 box_run_args
-container run "${BOX_RUN_ARGS[@]}" \
+box_run "${BOX_RUN_ARGS[@]}" \
   --env ANTHROPIC_API_KEY \
   --env ANTHROPIC_AUTH_TOKEN \
   --env ANTHROPIC_BASE_URL \

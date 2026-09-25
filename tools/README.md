@@ -1,7 +1,10 @@
 # The agent boxes
 
-Five scripts that run a coding agent inside an Apple `container` VM confined to
-`$PWD`, so the agent can be given every permission and the VM is the boundary:
+Five scripts that run a coding agent inside a container confined to `$PWD`, so
+the agent can be given every permission and the container is the boundary. On a
+Mac that's Apple's `container` VM; on a Linux host (Arch) the same image runs
+as a rootless podman container — no VM, and none of the Mac-only machinery
+(socat bridge, pf/DNS domain, per-boot sudo) applies:
 
 | script | agent |
 |---|---|
@@ -17,12 +20,42 @@ lifecycle, the Mac-loopback DNS domain, the Docker bridge, the common
 copy sitting next to it, so keep the two together when you copy a box
 somewhere.
 
-Requires Apple Silicon, macOS 26 and `brew install container`.
+Requires Apple Silicon, macOS 26 and `brew install container`, or Linux with
+rootless podman (see [below](#linux-rootless-podman)). On the Linux host
+podman's Docker-compatible socket and, with `--ssh`, your ssh-agent
+bind-mount straight into the box.
 
 The two that talk to a vendor sign in on first launch. claude-box logs in as
-usual. agy-box has no browser in the VM, so it prints a URL: open it on the
-Mac, sign in, paste the code back. Both logins land in the box's home and
+usual. agy-box's box has no browser, so it prints a URL: open it on the host,
+sign in, paste the code back. Both logins land in the box's home and
 survive `--clean`.
+
+### Linux: rootless podman
+
+The box runs as root and bind-mounts `$PWD` and its home. Under a rootful
+runtime everything the agent writes would be root-owned on the host: the next
+launch's config sync fails, `--clean` fails, and git in the box refuses the
+repo ("dubious ownership"). Rootless podman maps the box's root to your own
+uid, so what the agent writes stays yours, and there is no daemon. The boxes
+refuse to start if podman isn't rootless. On Arch:
+
+```sh
+sudo pacman -S podman
+grep -q "^$USER:" /etc/subuid ||
+  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+podman system migrate     # only if podman ran before the subuid range existed
+systemctl --user enable --now podman.socket   # only for *_BOX_DOCKER
+```
+
+With `*_BOX_DOCKER` the agent's `docker` CLI talks to podman's Docker API.
+`docker run`, `docker compose` and classic `docker build` work; BuildKit-only
+features (`buildx`, `RUN --mount`) don't, since the box pins
+`DOCKER_BUILDKIT=0`. Point `*_BOX_DOCKER_SOCK` at a real Docker socket if you
+need those.
+
+One caveat: a file created inside the box by a uid other than root (say
+`nobody`) maps to your subuid range on the host (100000 and up), not to you.
+The agents all run as root, so that is rare.
 
 ## Customizing a box
 
@@ -94,8 +127,8 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM sizing (default 4 / 4G) |
 | `*_BOX_SSH` | forward your ssh-agent in, and pass `gh auth token` along |
 | `*_BOX_PROFILE` | read the box home's `.env.<name>` (lines like `export SOME_VAR=SOME_VAL`) and pass its variables in |
-| `*_BOX_DOCKER` | let the agent drive the Mac's Docker engine |
-| `*_BOX_DOCKER_SOCK` | which Docker socket (auto-detected; colima first) |
+| `*_BOX_DOCKER` | let the agent drive the host's Docker engine |
+| `*_BOX_DOCKER_SOCK` | which Docker socket (auto-detected: colima first on a Mac, your podman socket on Linux) |
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | the localhost DNS domain used for that |
 
 Each script's header documents its own knobs on top of these — model defaults
@@ -138,6 +171,8 @@ installs, `~/.npm`, `~/.cargo` and friends, but not your login or history. Both
 print the directory's size before they touch it.
 
 ## The once-per-boot sudo
+
+macOS only — on a Linux host there is no host-side setup at all.
 
 The first launch after a boot sets up the Mac-loopback DNS domain
 (`*_BOX_HOST_ALIAS`) — an `/etc/resolver` file plus a `pf` rule — which needs
