@@ -137,7 +137,7 @@ checkpoints and caches stay `localllm`-owned. `setup.sh` gives `localllm` a
 subuid range and a lingering user manager, so run it first:
 
 ```bash
-sudo pacman -S podman
+sudo pacman -S podman crun
 sudo ./setup.sh
 sudo git clone https://codeberg.org/ggz14/radiance-vllm-mxfp4 /opt/localllm/radiance
 sudo chown -R localllm:localllm /opt/localllm/radiance
@@ -157,6 +157,15 @@ the `docker` group and re-own the root-owned caches), free the old image with
 slower than a llama-server preset — engine init plus, on the very first run,
 kernel compilation. Delete the preset from the table (and `PRELOAD`) if you
 don't want any of this; nothing else depends on it.
+
+All logs, the pool's and every engine's, are in `journalctl -u localllm -f`.
+`setup.sh` sets `localllm`'s podman to the `passthrough` log driver, so a
+container writes straight to the pool's stdout, and turns off per-container
+cgroups, so it stays in `localllm.service` (journald files lines by the
+writer's cgroup). That also makes `systemctl stop localllm` stop the
+containers with it. The costs: `podman logs` shows nothing (despite what
+radiance prints), `podman run -d` as `localllm` needs `--log-driver k8s-file`,
+and there are no per-container limits or `podman stats`.
 
 ## Agents (pi / OpenCode / OCR)
 

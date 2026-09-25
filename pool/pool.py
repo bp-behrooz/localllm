@@ -76,18 +76,18 @@ class Instance:
         self.port = 8080 + min(gpus)  # gpu sets are disjoint, so ports are too
         self.inflight = 0
         self.last_used = time.monotonic()
+        self.container = None  # cmd presets: the podman container's name
         preset = PRESETS[name]
         gpu_list = ",".join(map(str, gpus))
         env = dict(os.environ, HIP_VISIBLE_DEVICES=gpu_list)
         if "cmd" in preset:
             # custom engine (e.g. radiance/vLLM): the command reads PORT / GPUS /
             # NAME from the environment and must serve /health and /v1 on PORT.
-            # ponytail: stop() SIGTERMs the launcher (podman forwards it); a
-            # kill -9 fallback can orphan a container -- the fixed NAME lets the
-            # preset's launcher replace it on the next spawn (radiance does, with
-            # podman run --replace).
+            # A launcher that runs a container names it NAME, so stop() can
+            # stop it with podman.
+            self.container = f"pool-{name}-{self.port}"
             env.update(PORT=str(self.port), GPUS=gpu_list,
-                       GPU_IDS=gpu_list, NAME=f"pool-{name}-{self.port}")
+                       GPU_IDS=gpu_list, NAME=self.container)
             cmd = ["bash", "-c", preset["cmd"]]
         else:
             cmd = [LLAMA_BIN, "-hf", preset["hf"], "-fa", "on", "--jinja",
@@ -119,6 +119,14 @@ class Instance:
 
     def stop(self):
         self.loader.cancel()
+        if self.container:
+            # killing the launcher doesn't stop its container (conmon keeps it
+            # running), so stop that by name first; -i: fine if there's none
+            try:
+                subprocess.run(["podman", "stop", "-i", "-t", "30", self.container],
+                               stdout=subprocess.DEVNULL, timeout=60)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                print(f"[pool] podman stop {self.container}: {e}", file=sys.stderr)
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -339,6 +347,8 @@ def selftest():
         spawned.append((cmd, env or {}))
         return FakeProc()
     subprocess.Popen = fake_popen
+    ran = []
+    subprocess.run = lambda cmd, **kw: ran.append(cmd)
     async def instantly_ready(self): pass
     Instance._wait_ready = instantly_ready
 
@@ -395,6 +405,9 @@ def selftest():
         assert cmd[:2] == ["bash", "-c"] and "fake-serve" in cmd[2]
         assert env["PORT"] == str(rad.port) and env["GPUS"] == "70,71"
         assert env["NAME"] == f"pool-rad-{rad.port}"
+        # ...and stopping it stops its container too (only cmd presets do)
+        _drop(rad)
+        assert ran == [["podman", "stop", "-i", "-t", "30", env["NAME"]]], ran
 
         # 9. preload: the configured default loads at startup
         global PRELOAD

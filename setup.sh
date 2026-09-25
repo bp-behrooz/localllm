@@ -92,7 +92,9 @@ usermod -aG render,video localllm
 # no root-equivalent docker group, and what a container writes stays localllm-owned.
 # It needs its own subuid/subgid range (placed after every existing one) and a
 # lingering user manager for /run/user/<uid>.
-command -v podman >/dev/null || echo "warning: podman not found; cmd presets need it (pacman -S podman)"
+for c in podman crun; do
+  command -v "$c" >/dev/null || echo "warning: $c not found; cmd presets need it (pacman -S $c)"
+done
 id -nG localllm | grep -qw docker && gpasswd -d localllm docker
 for f in subuid subgid; do # podman needs both; check each on its own
   grep -q '^localllm:' "/etc/$f" 2>/dev/null && continue
@@ -107,6 +109,16 @@ loginctl enable-linger localllm
 mkdir -p /opt/localllm/.config/containers/registries.conf.d
 echo 'unqualified-search-registries = ["docker.io"]' \
   >/opt/localllm/.config/containers/registries.conf.d/50-dockerhub.conf
+# Make a container's output and lifetime belong to localllm.service: the
+# passthrough log driver writes it straight to the pool's stdout, and without a
+# cgroup of its own it stays in the unit's cgroup (journald files lines by the
+# writer's cgroup, and stopping the unit stops it). Costs: no `podman logs`, no
+# `podman run -d`, no per-container limits. runc can't go cgroup-less; crun can.
+mkdir -p /opt/localllm/.config/containers/containers.conf.d
+printf '[containers]\nlog_driver = "passthrough"\n' \
+  >/opt/localllm/.config/containers/containers.conf.d/50-logs.conf
+printf '[containers]\ncgroups = "disabled"\n[engine]\nruntime = "crun"\n' \
+  >/opt/localllm/.config/containers/containers.conf.d/50-cgroups.conf
 [[ -x /opt/localllm/venv/bin/uvicorn ]] || {
   [[ -d /opt/localllm/venv ]] || python3 -m venv /opt/localllm/venv
   /opt/localllm/venv/bin/pip install -q --upgrade pip -r "$(dirname "$0")/pool/requirements.txt"
