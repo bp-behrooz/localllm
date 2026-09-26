@@ -37,7 +37,11 @@ HF_TOKEN=hf_xxx ./setup.sh    # token is stored in /opt/localllm/env; only neede
 The final output prints the API key (`MASTER_KEY`) clients must send as a
 Bearer token (`Authorization: Bearer sk-xxx`), or, for clients that can only
 send a bare key in a header of their choosing, as `x-litellm-api-key: sk-xxx`.
-`systemctl start|stop localllm` controls the whole stack.
+`systemctl start|stop localllm` controls the whole stack. Optional env vars in
+`/opt/localllm/env`: `POWER_CAP_W` (per-GPU watts, one of the powerbench-tested
+300/270/240/210; written to the GPUs' `power1_cap` sysfs at startup — the
+unit needs write access to that file, i.e. root or a group-writable file),
+`IDLE_TTL` / `IDLE_TTL_CMD` / `REAP_INTERVAL` (seconds; override `pool.json`).
 
 ## Presets
 

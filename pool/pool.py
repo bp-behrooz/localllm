@@ -3,15 +3,17 @@
 
 The whole front end: an OpenAI-compatible, key-authenticated server on
 0.0.0.0:4000. Requesting a model loads it on a free GPU (or both, for presets
-that need them), LRU-evicting idle instances when no GPU is free. A
+that need them), LRU-evicting idle instances when no GPU is free, and unloading any instance
+left idle past its preset's TTL so the GPUs can drop into BACO. A
 single-GPU model can run as two load-balanced instances: both are started up
 front when the whole pool is free (and the model is already downloaded), and
 a busy model scales out onto a free or long-idle GPU on demand. Config comes
-from pool.json and the MASTER_KEY env var, both provided by setup.sh.
+from pool.json and env vars (see README), both provided by setup.sh.
 
 Self-test (no GPUs or config needed): python3 pool.py --test
 """
 import asyncio
+import glob
 import json
 import os
 import re
@@ -34,12 +36,20 @@ CACHE_HUB = os.path.join(HERE, ".cache/huggingface/hub")
 GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD = [], {}, "", "", []
 READY_TIMEOUT = 3600  # first start of a preset may have to download the model
 IDLE_SCALE_EVICT = 600  # only sacrifice a model idle this long to duplicate a busy one
+# Unload an instance idle this long (seconds; 0 = never) so its GPUs can power
+# down. cmd presets (vLLM) load slowly, so they get their own, longer default.
+# An env var or pool.json can override both, and a preset can set its own
+# "idle_ttl".
+IDLE_TTL, IDLE_TTL_CMD = 900, 2700
+REAP_INTERVAL = 30  # how often the reaper looks for idle instances
 
 @asynccontextmanager
 async def _lifespan(_app):
     if PRELOAD:
         asyncio.create_task(preload_all())
+    reaper_task = asyncio.create_task(reaper())
     yield
+    reaper_task.cancel()
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -49,11 +59,49 @@ instances = {}  # name -> [Instance]
 
 
 def load_config():
-    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD
+    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL
     cfg = json.load(open(os.path.join(HERE, "pool.json")))
     GPUS, PRESETS, LLAMA_BIN = cfg["gpus"], cfg["presets"], cfg["llama_bin"]
     PRELOAD = cfg.get("preload", [])
+    # env var > pool.json > default
+    IDLE_TTL = int(os.environ.get("IDLE_TTL", cfg.get("idle_ttl", IDLE_TTL)))
+    IDLE_TTL_CMD = int(os.environ.get("IDLE_TTL_CMD", cfg.get("idle_ttl_cmd", IDLE_TTL_CMD)))
+    REAP_INTERVAL = int(os.environ.get("REAP_INTERVAL", REAP_INTERVAL))
     MASTER_KEY = os.environ["MASTER_KEY"]
+    _set_power_cap()
+
+
+def _set_power_cap():
+    """POWER_CAP_W (per-GPU watts, one of the powerbench.py tested caps) -> the GPUs'
+    power1_cap sysfs (uW); unset = leave alone."""
+    cap = os.environ.get("POWER_CAP_W")
+    if not cap:
+        return
+    tested = (300, 270, 240, 210)
+    try:
+        watts = float(cap)
+    except ValueError:
+        watts = None
+    if watts not in tested:
+        sys.exit(f"POWER_CAP_W={cap} W is not one of the tested caps {tested}")
+    cards = glob.glob("/sys/bus/pci/devices/*/hwmon/hwmon*/power1_cap")
+    if not cards:
+        sys.exit("POWER_CAP_W set but no power1_cap sysfs found")
+    try:
+        for f in cards:
+            open(f, "w").write(str(int(watts * 1e6)))
+    except PermissionError:
+        sys.exit("POWER_CAP_W: no write access to power1_cap; run the unit as root "
+                 "(or make the file group-writable for the pool user)")
+    print(f"[pool] power1_cap = {cap} W on {len(cards)} card(s)", file=sys.stderr)
+
+
+def idle_ttl(name):
+    """Seconds an instance of `name` may sit idle before it's unloaded; 0 = never."""
+    preset = PRESETS[name]
+    if "idle_ttl" in preset:
+        return preset["idle_ttl"]
+    return IDLE_TTL_CMD if "cmd" in preset else IDLE_TTL
 
 
 def authorized(headers):
@@ -150,13 +198,17 @@ def _free_gpus():
     return sorted(g for g in GPUS if g not in used)
 
 
-def _drop(inst):
-    inst.stop()
+def _forget(inst):
     lst = instances.get(inst.name, [])
     if inst in lst:
         lst.remove(inst)
     if not lst:
         instances.pop(inst.name, None)
+
+
+def _drop(inst):
+    inst.stop()
+    _forget(inst)
 
 
 def _evict_one(min_idle=0.0, exclude=None):
@@ -217,9 +269,12 @@ async def acquire(name):
 
 @app.get("/health")
 async def health():
+    now = time.monotonic()
     return {"status": "ok",
             "loaded": {n: [{"gpus": i.gpus, "inflight": i.inflight,
-                            "ready": i.ready} for i in lst]
+                            "ready": i.ready,
+                            "idle_s": int(now - i.last_used),
+                            "idle_ttl": idle_ttl(n)} for i in lst]
                        for n, lst in instances.items()}}
 
 
@@ -276,6 +331,39 @@ async def preload_all():
             await acquire(name)
         except Exception as e:
             print(f"[pool] preload {name} failed: {e}", file=sys.stderr)
+
+
+async def reap_idle():
+    """Unload every instance idle past its TTL. Once its engine exits, nothing
+    holds the GPU open and the kernel can runtime-suspend it."""
+    async with lock:
+        now = time.monotonic()
+        for name in list(instances):
+            ttl = idle_ttl(name)
+            if not ttl:
+                continue
+            for inst in list(_alive(name)):
+                # skip in-flight work and instances still loading (a first
+                # start may be downloading the model for a long time)
+                if inst.inflight or not inst.loader.done() \
+                        or now - inst.last_used < ttl:
+                    continue
+                print(f"[pool] unloading {name} on GPU {inst.gpus}: idle "
+                      f"{int(now - inst.last_used)}s (ttl {ttl}s)", file=sys.stderr)
+                # stop() blocks (podman stop, proc.wait); run it in a thread so
+                # health checks and streams keep flowing. The lock stays held,
+                # so no new instance lands on these GPUs until they're free.
+                await asyncio.to_thread(inst.stop)
+                _forget(inst)
+
+
+async def reaper():
+    while True:
+        await asyncio.sleep(REAP_INTERVAL)
+        try:
+            await reap_idle()
+        except Exception as e:
+            print(f"[pool] reaper: {e}", file=sys.stderr)
 
 
 @app.post("/v1/{path:path}")
@@ -456,6 +544,83 @@ def selftest():
         assert a.inflight == 0
         await api.aclose()
         await anon.aclose()
+
+        # 11. idle reaping: per-kind TTLs, busy and loading instances spared
+        global IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL
+        IDLE_TTL, IDLE_TTL_CMD = 100, 1000
+        for lst in list(instances.values()):
+            for i in list(lst):
+                _drop(i)
+        assert idle_ttl("a") == 100 and idle_ttl("rad") == 1000
+        PRESETS["b"]["idle_ttl"] = 0  # per-preset override: never unload
+        assert idle_ttl("b") == 0
+        await acquire("a")  # whole pool free: eager pair
+        pair = list(instances["a"])
+        assert len(pair) == 2
+        for i in pair:
+            i.last_used -= 101
+        pair[0].inflight = 1
+        await reap_idle()
+        assert instances["a"] == [pair[0]]  # in flight: kept; idle twin unloaded
+        pair[0].inflight = 0
+        await reap_idle()
+        assert "a" not in instances  # idle past ttl: unloaded
+        rad = await acquire("rad")
+        rad.last_used -= 101  # past the llama ttl, not the cmd one
+        await reap_idle()
+        assert "rad" in instances
+        ran.clear()
+        rad.last_used -= 1000
+        await reap_idle()
+        assert "rad" not in instances
+        assert ran == [["podman", "stop", "-i", "-t", "30", rad.container]], ran
+        b = await acquire("b")
+        b.last_used -= 10**6
+        await reap_idle()
+        assert "b" in instances  # ttl 0: never unloaded
+        _drop(b)
+        # an instance still loading is never reaped, however long it takes
+        loading = Instance("a", [GPUS[0]])
+        loading.loader.cancel()
+        loading.loader = asyncio.get_running_loop().create_future()
+        loading.last_used -= 10**6
+        instances["a"] = [loading]
+        await reap_idle()
+        assert instances["a"] == [loading]
+        _drop(loading)
+
+        # 12. load_config: env > pool.json > default, and MASTER_KEY gets set
+        # (regression: a stranded line left MASTER_KEY unset -> 401 for all)
+        cfg_path = os.path.join(HERE, "pool.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"gpus": GPUS, "presets": PRESETS, "llama_bin": LLAMA_BIN,
+                       "idle_ttl": 55, "idle_ttl_cmd": 66}, f)
+        os.environ["MASTER_KEY"] = "sk-cfg"
+        os.environ["REAP_INTERVAL"] = "7"
+        load_config()
+        assert (MASTER_KEY, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL) == \
+            ("sk-cfg", 55, 66, 7), (MASTER_KEY, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL)
+        os.environ.pop("REAP_INTERVAL")
+        os.remove(cfg_path)
+
+        # 13. POWER_CAP_W: written to every card's power1_cap, in uW
+        capf = os.path.join(work, "power1_cap")
+        real_glob = glob.glob
+        glob.glob = lambda p: [capf]
+        os.environ["POWER_CAP_W"] = "210"
+        _set_power_cap()
+        assert open(capf).read() == "210000000"
+        os.environ.pop("POWER_CAP_W")
+        glob.glob = real_glob
+        # an untested or non-numeric cap is refused before any sysfs access
+        for bad in ("250", "eco"):
+            os.environ["POWER_CAP_W"] = bad
+            try:
+                _set_power_cap()
+                raise AssertionError(f"expected SystemExit for {bad!r}")
+            except SystemExit:
+                pass
+            os.environ.pop("POWER_CAP_W")
 
     asyncio.run(run())
     shutil.rmtree(work)
