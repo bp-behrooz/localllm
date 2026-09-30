@@ -35,9 +35,10 @@
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
-#   OC_BOX_DEFAULT      fallback model when no last-used model is known,
-#                       e.g. "localllm/qwen3-coder" or "opencode-go/minimax-m2.7"
-#                       (default localllm/<first synced model>)
+#   OC_BOX_DEFAULT      model a sync makes the current one, e.g. "localllm/qwen3-coder"
+#                       or "opencode-go/minimax-m2.7" (default localllm/<first synced
+#                       model>, i.e. the server's preloaded one); switching models in
+#                       opencode sticks until the next sync
 #   OPENCODE_API_KEY    passed through for OpenCode Go (built in)
 #   OC_BOX_HIDE         comma-separated provider ids to disable
 #                       (default "opencode", i.e. OpenCode Zen; "" disables nothing)
@@ -60,7 +61,7 @@ OC_VERSION="${OC_BOX_VERSION:-latest}"
 OC_BOX_HOME="${OC_BOX_HOME:-$HOME/.opencode-box}"
 PROVIDER="localllm"
 BOX_HOME="$OC_BOX_HOME"
-BOX_KEEP=(.config/opencode .local/share/opencode)
+BOX_KEEP=(.config/opencode .local/share/opencode .local/state/opencode)
 
 # ----------------------------------------------------------------- lib ------
 # agent-box-lib.bash sits next to this script. Symlinks are followed, so
@@ -146,16 +147,19 @@ EOF
 }
 
 config_path() { echo "$OC_BOX_HOME/.config/opencode/opencode.json"; }
+# opencode's last-used models; the first valid "recent" entry is what it starts on
+state_path() { echo "$OC_BOX_HOME/.local/state/opencode/model.json"; }
 
 sync_models() {
   # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
   # the localllm provider's models map. Other providers and hand-edited fields
-  # are kept. Seeds the config on first run.
+  # are kept. Seeds the config on first run. Puts the default model first in
+  # opencode's recent models, so that's where the next launch starts.
   : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
   : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
   mkdir -p "$(dirname "$(config_path)")"
 
-  OC_CONFIG="$(config_path)" OC_BOX_DEFAULT="${OC_BOX_DEFAULT:-}" PROVIDER="$PROVIDER" \
+  OC_CONFIG="$(config_path)" OC_STATE="$(state_path)" OC_BOX_DEFAULT="${OC_BOX_DEFAULT:-}" PROVIDER="$PROVIDER" \
     python3 - <<'PYEOF'
 import json, os, sys, urllib.request
 from pathlib import Path
@@ -197,11 +201,26 @@ opts["baseURL"] = base
 opts.setdefault("apiKey", "{env:LOCAL_LLM_API_KEY}")   # resolved by opencode at runtime
 prov["models"] = models
 
-if "model" not in cfg:
-    cfg["model"] = os.environ.get("OC_BOX_DEFAULT") or f"{provider}/{next(iter(models))}"
-    print("==> fallback model %s" % cfg["model"], file=sys.stderr)
-
+# A "model" in the config outranks the recent models, so it would undo every
+# switch made inside opencode on the next launch. Start there via the recent
+# list instead; earlier versions of this script wrote the pin, so drop it.
+if cfg.pop("model", None):
+    print("==> removed the config's pinned model", file=sys.stderr)
 cpath.write_text(json.dumps(cfg, indent=2) + "\n")
+
+default = os.environ.get("OC_BOX_DEFAULT") or f"{provider}/{next(iter(models))}"
+pid, _, mid = default.partition("/")
+spath = Path(os.environ["OC_STATE"])
+try:
+    state = json.loads(spath.read_text())
+except (OSError, ValueError):
+    state = {}
+recent = [m for m in state.get("recent", [])
+          if (m.get("providerID"), m.get("modelID")) != (pid, mid)]
+state["recent"] = [{"providerID": pid, "modelID": mid}, *recent]
+spath.parent.mkdir(parents=True, exist_ok=True)
+spath.write_text(json.dumps(state, indent=2) + "\n")
+print("==> current model %s" % default, file=sys.stderr)
 print("==> synced %d local model(s): %s" % (len(models), ", ".join(models)), file=sys.stderr)
 PYEOF
 }

@@ -104,7 +104,7 @@ The box's home directory on the Mac is mounted as the container's entire
 | `claude-box` | `~/.claude-box` | `.claude/` — login, settings, `CLAUDE.md`, history |
 | `agy-box` | `~/.agy-box` | `.gemini/` — login, settings, plugins, conversations |
 | `pi-box` | `~/.pi-box` | `.pi/` — config, models, sessions |
-| `opencode-box` | `~/.opencode-box` | `.config/opencode/`, `.local/share/opencode/` |
+| `opencode-box` | `~/.opencode-box` | `.config/opencode/`, `.local/share/opencode/`, `.local/state/opencode/` |
 | `ocr-box` | `~/.ocr-box` | `.opencodereview/` — config, `rule.json`, review sessions |
 
 So mise runtimes (`~/.local/share/mise`), gems installed into them, `~/.npm`,
