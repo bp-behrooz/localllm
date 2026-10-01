@@ -266,7 +266,18 @@ box_ensure_host_alias() {
     # Only the pf rule can be stale. Reload it — `dns delete`+`create` would tear the
     # domain down and HUP mDNSResponder, a DNS blip for everything else on the Mac.
     echo "==> reloading the '$alias' pf rule (sudo, once per boot)" >&2
-    sudo /sbin/pfctl -a com.apple/container -f "$anchor"
+    # pfctl always warns about -f flushing the main ruleset (it doesn't: -a scopes the
+    # load to the anchor) and about ALTQ. Drop that noise unless the load fails. Not -q:
+    # the sudoers entry in tools/README.md matches these exact args.
+    local out
+    if ! out=$(sudo /sbin/pfctl -a com.apple/container -f "$anchor" 2>&1); then
+      printf '%s\n' "$out" >&2
+      return 1
+    fi
+    printf '%s\n' "$out" | grep -vE \
+      -e '^pfctl: Use of -f option' -e '^present in the main ruleset' \
+      -e '^See /etc/pf.conf' -e '^No ALTQ support' -e '^ALTQ related functions' \
+      -e '^$' >&2 || true
   else
     echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
     sudo container system dns delete "$alias" >/dev/null 2>&1 || true
