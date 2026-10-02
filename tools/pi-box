@@ -11,7 +11,7 @@
 #                              host's gh token along (same as PI_BOX_SSH=1)
 #   pi-box --profile=NAME      read $PI_BOX_HOME/.env.NAME (lines like
 #                              `export SOME_VAR=SOME_VAL`) and pass its
-#                              variables into the box (same as PI_BOX_PROFILE)
+#                              variables into the box (same as PI_BOX_PROFILE; or --profile NAME)
 #   pi-box --clean             drop the box's runtimes and caches, keep its config
 #   pi-box --clean-all         delete PI_BOX_HOME entirely (asks first)
 #
@@ -44,7 +44,7 @@
 #   PI_BOX_SSH          1: forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
 #   PI_BOX_PROFILE      name of a profile: $PI_BOX_HOME/.env.NAME is read and its
-#                       variables passed into the box (same as --profile=NAME)
+#                       variables passed into the box (same as --profile NAME)
 #   PI_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Bridges your
 #                       Docker socket to TCP with socat and sets up Apple's localhost
 #                       DNS domain for container->Mac traffic (sudo, once per boot).
@@ -120,6 +120,16 @@ while [[ $# -gt 0 ]]; do
     # shellcheck disable=SC2034
     PI_BOX_SSH=1
     shift
+    ;;
+  --profile)
+    [[ $# -ge 2 ]] || {
+      echo "error: --profile requires an argument" >&2
+      exit 1
+    }
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
+    # shellcheck disable=SC2034
+    PI_BOX_PROFILE="$2"
+    shift 2
     ;;
   --profile=*)
     # Not dead: the lib reads it back as `box_knob PROFILE`.

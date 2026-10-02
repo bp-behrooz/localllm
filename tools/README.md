@@ -192,15 +192,15 @@ first-ever `container system dns` setup still prompts.
 
 ## Flags
 
-Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--profile=NAME`,
-`--clean`, `--clean-all`. The boxes that use this repo's server (pi-box,
-opencode-box, ocr-box) add `--sync` and `--sync-only`, which re-read the served
-model list from the LLM server and rewrite the box's config —
+Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--profile NAME`
+(or `--profile=NAME`), `--clean`, `--clean-all`. The boxes that use this repo's
+server (pi-box, opencode-box, ocr-box) add `--sync` and `--sync-only`, which
+re-read the served model list from the LLM server and rewrite the box's config —
 pi-box and opencode-box record context limits too, ocr-box writes a `localllm`
 provider (reviewing with `OCR_BOX_MODEL`, default: the first model the server
 reports). Everything else is passed through to the agent.
 
-`--profile=NAME` reads `$<box home>/.env.NAME` — a shell file of
+`--profile NAME` (or `--profile=NAME`) reads `$<box home>/.env.NAME` — a shell file of
 `export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into
 the box, so a per-project or per-task set of credentials and endpoints is one
 flag away without exporting anything in your own shell.

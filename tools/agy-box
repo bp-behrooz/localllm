@@ -12,7 +12,7 @@
 #   agy-box --ssh [args...]      forward your ssh-agent into the box, and pass the
 #                                host's gh token along (same as AGY_BOX_SSH=1)
 #   agy-box --profile=NAME       read $AGY_BOX_HOME/.env.NAME and pass its variables
-#                                into the box (same as AGY_BOX_PROFILE)
+#                                into the box (same as AGY_BOX_PROFILE; or --profile NAME)
 #   agy-box --clean              drop the box's runtimes and caches, keep its login
 #   agy-box --clean-all          delete AGY_BOX_HOME entirely (asks first)
 #
@@ -49,7 +49,7 @@
 #   AGY_BOX_SSH         1: forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
 #   AGY_BOX_PROFILE     name of a profile: $AGY_BOX_HOME/.env.NAME is read and its
-#                       variables passed into the box (same as --profile=NAME)
+#                       variables passed into the box (same as --profile NAME)
 #   AGY_BOX_DOCKER      1: let the agent use your Mac's Docker engine
 #   AGY_BOX_DOCKER_SOCK path to the Docker socket (auto-detected; colima first)
 #   AGY_BOX_HOST_ALIAS  the localhost domain name (default host.container.internal)
@@ -106,7 +106,18 @@ while [[ $# -gt 0 ]]; do
     AGY_BOX_SSH=1
     shift
     ;;
+  --profile)
+    [[ $# -ge 2 ]] || {
+      echo "error: --profile requires an argument" >&2
+      exit 1
+    }
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
+    # shellcheck disable=SC2034
+    AGY_BOX_PROFILE="$2"
+    shift 2
+    ;;
   --profile=*)
+    # Not dead: the lib reads it back as `box_knob PROFILE`.
     # shellcheck disable=SC2034
     AGY_BOX_PROFILE="${1#--profile=}"
     shift
