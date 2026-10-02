@@ -164,7 +164,9 @@ box_build_image() {
   # Cleaned up by hand rather than with a RETURN trap: bash leaves such a trap
   # registered after the function returns, and it would fire again — with $ctx
   # long gone — when box_ensure_image returns.
-  local ctx note="${1-}" rc=0
+  local ctx note="${1-}" rc=0 nocache=()
+  # --rebuild: skip the layer cache, else `npm install ...@latest` is reused stale
+  [[ ${2-0} -eq 1 ]] && nocache=(--no-cache)
   ctx=$(mktemp -d)
 
   {
@@ -173,7 +175,7 @@ box_build_image() {
   } >"$ctx/Dockerfile"
 
   echo "==> building image $BOX_IMAGE${note:+ ($note)}" >&2
-  "${BOX_CTR[@]}" build --tag "$BOX_IMAGE" "$ctx" || rc=$?
+  "${BOX_CTR[@]}" build ${nocache[@]+"${nocache[@]}"} --tag "$BOX_IMAGE" "$ctx" || rc=$?
   rm -rf "$ctx"
   return "$rc"
 }
@@ -183,7 +185,7 @@ box_ensure_image() {
   local rebuild="$1" build_only="$2" note="${3-}"
   if [[ $rebuild -eq 1 ]]; then
     box_remove_images
-    box_build_image "$note"
+    box_build_image "$note" 1
   elif [[ $build_only -eq 1 ]] || ! box_have_image; then
     box_build_image "$note"
   fi
