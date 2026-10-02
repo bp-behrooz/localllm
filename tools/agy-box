@@ -149,7 +149,7 @@ p = Path(sys.argv[1])
 s = json.loads(p.read_text()) if p.is_file() else {}
 before = json.dumps(s, sort_keys=True)
 s["enableTerminalSandbox"] = False
-s["altScreenMode"] = "always"
+s.setdefault("altScreenMode", "always")  # flicker-free default; user's pick wins
 s["runningLightSpeed"] = "off"
 trusted = s.setdefault("trustedWorkspaces", [])
 if sys.argv[2] not in trusted:

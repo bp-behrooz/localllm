@@ -133,7 +133,7 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 
 Each script's header documents its own knobs on top of these — model defaults
 and provider hiding for pi-box and opencode-box, the review model for ocr-box,
-renderer and mouse handling for claude-box, approval prompts for claude-box and
+approval prompts for claude-box and
 agy-box (both off by default; the VM is the boundary). agy-box also trusts
 `$PWD` up front and installs its default plugins (ponytail) on first launch.
 
