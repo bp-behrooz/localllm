@@ -56,6 +56,7 @@ set -euo pipefail
 BOX_IMAGE="opencode-box"
 BOX_NAME_PREFIX="oc"
 BOX_ENV_PREFIX="OC_BOX"
+BOX_CAN_SYNC=1
 
 OC_VERSION="${OC_BOX_VERSION:-latest}"
 OC_BOX_HOME="${OC_BOX_HOME:-$HOME/.opencode-box}"
@@ -81,67 +82,8 @@ dir="$(cd -P "$(dirname "$self")" && pwd)"
 source "$dir/agent-box-lib.bash"
 
 # ---------------------------------------------------------------- flags -----
-REBUILD=0
-BUILD_ONLY=0
-SYNC=0
-SYNC_ONLY=0
-CLEAN=
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --rebuild)
-    REBUILD=1
-    shift
-    ;;
-  --build-only)
-    BUILD_ONLY=1
-    shift
-    ;;
-  --sync)
-    SYNC=1
-    shift
-    ;;
-  --sync-only)
-    SYNC_ONLY=1
-    shift
-    ;;
-  --clean)
-    CLEAN=keep
-    shift
-    ;;
-  --clean-all)
-    CLEAN=all
-    shift
-    ;;
-  --ssh)
-    # Not dead: the lib reads it back as `box_knob SSH`, i.e. indirectly
-    # through BOX_ENV_PREFIX, which shellcheck can't follow.
-    # shellcheck disable=SC2034
-    OC_BOX_SSH=1
-    shift
-    ;;
-  --profile)
-    [[ $# -ge 2 ]] || {
-      echo "error: --profile requires an argument" >&2
-      exit 1
-    }
-    # Not dead: the lib reads it back as `box_knob PROFILE`.
-    # shellcheck disable=SC2034
-    OC_BOX_PROFILE="$2"
-    shift 2
-    ;;
-  --profile=*)
-    # Not dead: the lib reads it back as `box_knob PROFILE`.
-    # shellcheck disable=SC2034
-    OC_BOX_PROFILE="${1#--profile=}"
-    shift
-    ;;
-  --)
-    shift
-    break
-    ;;
-  *) break ;; # everything else goes to opencode
-  esac
-done
+box_parse_args "$@"
+set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
 
 # ------------------------------------------------------------- helpers ------
 box_dockerfile_agent() {

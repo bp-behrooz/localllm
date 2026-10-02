@@ -11,7 +11,7 @@
 # A library, not a program: it has no shebang, isn't executable, and each *-box
 # script sources the copy sitting next to it.
 #
-# The sourcing script sets three variables first:
+# The sourcing script sets these variables first:
 #
 #   BOX_IMAGE        image tag to build and run       (e.g. "claude-box")
 #   BOX_NAME_PREFIX  prefix for container names       (e.g. "cl")
@@ -19,6 +19,7 @@
 #   BOX_HOME         host dir mounted as the box's /root
 #   BOX_KEEP         paths under BOX_HOME that `--clean` preserves, relative
 #                    (e.g. (.claude) — the logins and settings, not the runtimes)
+#   BOX_CAN_SYNC     optional: 1 if the box adds --sync / --sync-only (default 0)
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
@@ -51,6 +52,77 @@ box_knob() {
   local var="${BOX_ENV_PREFIX}_$1" val
   val="${!var-}"
   printf '%s' "${val:-${2-}}"
+}
+
+# ----------------------------------------------------------------- flags -----
+# Parses common flags shared by all boxes:
+#   --rebuild, --build-only, --clean, --clean-all, --ssh, --profile[=NAME]
+# plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
+# Remaining arguments are left in BOX_ARGS; caller typically runs:
+#   box_parse_args "$@"
+#   set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
+box_parse_args() {
+  REBUILD=0
+  BUILD_ONLY=0
+  CLEAN=
+  SYNC=0
+  SYNC_ONLY=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --rebuild)
+      REBUILD=1
+      shift
+      ;;
+    --build-only)
+      BUILD_ONLY=1
+      shift
+      ;;
+    --clean)
+      CLEAN=keep
+      shift
+      ;;
+    --clean-all)
+      CLEAN=all
+      shift
+      ;;
+    --ssh)
+      printf -v "${BOX_ENV_PREFIX}_SSH" '%s' 1
+      shift
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || {
+        echo "error: --profile requires an argument" >&2
+        exit 1
+      }
+      printf -v "${BOX_ENV_PREFIX}_PROFILE" '%s' "$2"
+      shift 2
+      ;;
+    --profile=*)
+      printf -v "${BOX_ENV_PREFIX}_PROFILE" '%s' "${1#--profile=}"
+      shift
+      ;;
+    --sync)
+      [[ ${BOX_CAN_SYNC:-0} -eq 1 ]] || break
+      SYNC=1
+      shift
+      ;;
+    --sync-only)
+      [[ ${BOX_CAN_SYNC:-0} -eq 1 ]] || break
+      SYNC_ONLY=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+    esac
+  done
+
+  BOX_ARGS=("$@")
 }
 
 # --------------------------------------------------------------- runtime -----

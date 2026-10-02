@@ -80,55 +80,8 @@ dir="$(cd -P "$(dirname "$self")" && pwd)"
 source "$dir/agent-box-lib.bash"
 
 # ---------------------------------------------------------------- flags -----
-REBUILD=0
-BUILD_ONLY=0
-CLEAN=
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --rebuild)
-    REBUILD=1
-    shift
-    ;;
-  --build-only)
-    BUILD_ONLY=1
-    shift
-    ;;
-  --clean)
-    CLEAN=keep
-    shift
-    ;;
-  --clean-all)
-    CLEAN=all
-    shift
-    ;;
-  --ssh)
-    # shellcheck disable=SC2034
-    AGY_BOX_SSH=1
-    shift
-    ;;
-  --profile)
-    [[ $# -ge 2 ]] || {
-      echo "error: --profile requires an argument" >&2
-      exit 1
-    }
-    # Not dead: the lib reads it back as `box_knob PROFILE`.
-    # shellcheck disable=SC2034
-    AGY_BOX_PROFILE="$2"
-    shift 2
-    ;;
-  --profile=*)
-    # Not dead: the lib reads it back as `box_knob PROFILE`.
-    # shellcheck disable=SC2034
-    AGY_BOX_PROFILE="${1#--profile=}"
-    shift
-    ;;
-  --)
-    shift
-    break
-    ;;
-  *) break ;;
-  esac
-done
+box_parse_args "$@"
+set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
 
 # ------------------------------------------------------------- helpers ------
 box_dockerfile_agent() {
