@@ -23,7 +23,7 @@
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
-# _HOST_ALIAS_IP, _SSH, _CPUS, _MEMORY and _PROFILE, and names that same
+# _HOST_ALIAS_IP, _SSH, _SEARCH, _CPUS, _MEMORY and _PROFILE, and names that same
 # variable when it has to complain about it.
 #
 # ...and defines one function:
@@ -56,7 +56,8 @@ box_knob() {
 
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
-#   --rebuild, --build-only, --clean, --clean-all, --ssh, --profile[=NAME]
+#   --rebuild, --build-only, --clean, --clean-all, --ssh, --search,
+#   --profile[=NAME]
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
 #   box_parse_args "$@"
@@ -88,6 +89,10 @@ box_parse_args() {
       ;;
     --ssh)
       printf -v "${BOX_ENV_PREFIX}_SSH" '%s' 1
+      shift
+      ;;
+    --search)
+      printf -v "${BOX_ENV_PREFIX}_SEARCH" '%s' 1
       shift
       ;;
     --profile)

@@ -9,6 +9,8 @@
 #   opencode-box --sync-only         refresh the local model list and exit
 #   opencode-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                    host's gh token along (same as OC_BOX_SSH=1)
+#   opencode-box --search [args...]  enable Tavily web search MCP tools
+#                                    (same as OC_BOX_SEARCH=1; needs TAVILY_API_KEY)
 #   opencode-box --profile=NAME      read $OC_BOX_HOME/.env.NAME (lines like
 #                                    `export SOME_VAR=SOME_VAL`) and pass its
 #                                    variables into the box (same as OC_BOX_PROFILE; or --profile NAME)
@@ -40,6 +42,8 @@
 #                       model>, i.e. the server's preloaded one); switching models in
 #                       opencode sticks until the next sync
 #   OPENCODE_API_KEY    passed through for OpenCode Go (built in)
+#   OC_BOX_SEARCH       1 to enable Tavily web search MCP tools (same as --search)
+#   TAVILY_API_KEY      passed through when search is enabled (tavily-mcp)
 #   OC_BOX_HIDE         comma-separated provider ids to disable
 #                       (default "opencode", i.e. OpenCode Zen; "" disables nothing)
 #   OC_BOX_DOCKER       1 to expose the Mac's Docker daemon to the box (see notes)
@@ -178,10 +182,11 @@ PYEOF
 }
 
 ensure_settings() {
-  # Every launch: full permissions (the VM is the boundary) and the provider
-  # blocklist from OC_BOX_HIDE. Leaves everything else in the config alone.
+  # Every launch: full permissions (the VM is the boundary), the provider
+  # blocklist from OC_BOX_HIDE, and the Tavily MCP server when --search is enabled.
   mkdir -p "$(dirname "$(config_path)")"
-  OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" python3 - <<'PYEOF'
+  OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" \
+    OC_BOX_SEARCH="$(box_knob SEARCH)" python3 - <<'PYEOF'
 import json, os
 from pathlib import Path
 
@@ -195,6 +200,23 @@ if hide:
     cfg["disabled_providers"] = hide
 else:
     cfg.pop("disabled_providers", None)
+
+search_enabled = bool(os.environ.get("OC_BOX_SEARCH"))
+mcp = cfg.setdefault("mcp", {})
+if search_enabled:
+    mcp["tavily"] = {
+        "type": "local",
+        "command": ["npx", "-y", "tavily-mcp"],
+        "environment": {
+            "TAVILY_API_KEY": "{env:TAVILY_API_KEY}"
+        },
+        "enabled": True
+    }
+else:
+    mcp.pop("tavily", None)
+
+if not mcp:
+    cfg.pop("mcp", None)
 
 if json.dumps(cfg, sort_keys=True) != before:
     cpath.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -228,7 +250,18 @@ box_docker_bridge
 
 # not exec: the socat trap must outlive opencode
 box_run_args
+
+BOX_SEARCH_ENV=()
+if [[ -n "$(box_knob SEARCH)" ]]; then
+  [[ -n "${TAVILY_API_KEY:-}" ]] || {
+    echo "error: --search needs TAVILY_API_KEY set in your environment (or profile)" >&2
+    exit 1
+  }
+  BOX_SEARCH_ENV=(--env TAVILY_API_KEY)
+fi
+
 box_run "${BOX_RUN_ARGS[@]}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
+  ${BOX_SEARCH_ENV[@]+"${BOX_SEARCH_ENV[@]}"} \
   "$BOX_IMAGE" "$@"

@@ -126,6 +126,7 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 | `*_BOX_VERSION` | npm version/tag of the agent itself (not agy-box: its installer always fetches the latest, so `--rebuild` to update) |
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM sizing (default 4 / 4G) |
 | `*_BOX_SSH` | forward your ssh-agent in, and pass `gh auth token` along |
+| `*_BOX_SEARCH` | enable Tavily web search / fetch tools (needs `TAVILY_API_KEY`) |
 | `*_BOX_PROFILE` | read the box home's `.env.<name>` (lines like `export SOME_VAR=SOME_VAL`) and pass its variables in |
 | `*_BOX_DOCKER` | let the agent drive the host's Docker engine |
 | `*_BOX_DOCKER_SOCK` | which Docker socket (auto-detected: colima first on a Mac, your podman socket on Linux) |
@@ -192,10 +193,11 @@ first-ever `container system dns` setup still prompts.
 
 ## Flags
 
-Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--profile NAME`
-(or `--profile=NAME`), `--clean`, `--clean-all`. The boxes that use this repo's
-server (pi-box, opencode-box, ocr-box) add `--sync` and `--sync-only`, which
-re-read the served model list from the LLM server and rewrite the box's config —
+Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--search`,
+`--profile NAME` (or `--profile=NAME`), `--clean`, `--clean-all`. The boxes that
+use this repo's server (pi-box, opencode-box, ocr-box) add `--sync` and
+`--sync-only`, which re-read the served model list from the LLM server and
+rewrite the box's config —
 pi-box and opencode-box record context limits too, ocr-box writes a `localllm`
 provider (reviewing with `OCR_BOX_MODEL`, default: the first model the server
 reports). Everything else is passed through to the agent.
