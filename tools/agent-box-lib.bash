@@ -57,7 +57,7 @@ box_knob() {
 
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
-#   --rebuild, --build-only, --clean, --clean-all, --ssh, --docker, --search,
+#   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --docker, --search,
 #   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
@@ -87,6 +87,10 @@ box_parse_args() {
       ;;
     --clean-all)
       CLEAN=all
+      shift
+      ;;
+    --clean-data)
+      CLEAN=data
       shift
       ;;
     --ssh)
@@ -139,14 +143,16 @@ box_parse_args() {
 
   BOX_ARGS=("$@")
 
-  # The name becomes part of file paths (.env.NAME, ~/.box.NAME.dockerfile)
-  # and an image tag, so keep it to a plain word.
-  local profile
-  profile="$(box_knob PROFILE)"
-  [[ -z $profile || $profile =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || {
-    echo "error: profile name '$profile': use letters, digits, '_', '.' and '-'" >&2
-    exit 1
-  }
+  # These names become part of file paths (.env.NAME, ~/.box.NAME.dockerfile),
+  # image tags and volume names, so keep them to a plain word.
+  local knob val
+  for knob in PROFILE PROJECT; do
+    val="$(box_knob "$knob")"
+    [[ -z $val || $val =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || {
+      echo "error: ${BOX_ENV_PREFIX}_$knob '$val': use letters, digits, '_', '.' and '-'" >&2
+      exit 1
+    }
+  done
 }
 
 # --------------------------------------------------------------- runtime -----
@@ -285,19 +291,36 @@ ENV PATH=/root/.local/share/mise/shims:$PATH
 # box-entry runs ahead of the agent (box_build_image puts it in front of the
 # agent's ENTRYPOINT). Under krun the ssh-agent arrives as a TCP port on the
 # host, since a bind-mounted Unix socket doesn't cross the VM boundary; turn it
-# back into the socket ssh expects. Then run the hooks in /etc/box-entry.d (a
-# profile's Dockerfile can start services there) and hand over. The label tells
-# the host this image has it.
-RUN mkdir -p /etc/box-entry.d \
+# back into the socket ssh expects. Fill any empty VOLUME from the copy taken at
+# build time (podman fills a new volume itself; Apple's container doesn't, and
+# hands over a fresh ext4 with only lost+found). A failing hook stops the box:
+# an agent without the services it expects is worse than an error.
+# Then run the hooks in /etc/box-entry.d (a profile's Dockerfile can start
+# services there) and hand over. With hooks in
+# /etc/box-exit.d it stays around instead, and runs them once the agent exits,
+# so services stop cleanly before the box is torn down. The label tells the
+# host which box-entry this image has.
+RUN mkdir -p /etc/box-entry.d /etc/box-exit.d \
  && printf '%s\n' '#!/bin/sh' \
       'if [ -n "$BOX_SSH_AGENT_TCP" ]; then' \
       '  socat "UNIX-LISTEN:$SSH_AUTH_SOCK,fork,unlink-early,mode=600" "TCP:$BOX_SSH_AGENT_TCP" &' \
       '  i=0; while [ ! -S "$SSH_AUTH_SOCK" ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i + 1)); done' \
       'fi' \
-      'for f in /etc/box-entry.d/*; do [ -x "$f" ] && "$f"; done' \
-      'exec "$@"' >/usr/local/bin/box-entry \
+      'if [ -f /etc/box-volumes ]; then while read -r p; do' \
+      '  s="/usr/local/share/box-seed$p"' \
+      '  [ -z "$(ls -A "$p" 2>/dev/null | grep -vx lost+found)" ] || continue' \
+      '  cp -a "$s/." "$p/" && chown "$(stat -c %u:%g "$s")" "$p" && chmod "$(stat -c %a "$s")" "$p"' \
+      'done </etc/box-volumes; fi' \
+      'for f in /etc/box-entry.d/*; do' \
+      '  [ -x "$f" ] || continue' \
+      '  "$f" || { echo "box-entry: $f failed; not starting the agent" >&2; exit 1; }' \
+      'done' \
+      '[ -n "$(ls /etc/box-exit.d)" ] || exec "$@"' \
+      '"$@"; rc=$?' \
+      'for f in /etc/box-exit.d/*; do [ -x "$f" ] && "$f"; done' \
+      'exit $rc' >/usr/local/bin/box-entry \
  && chmod +x /usr/local/bin/box-entry
-LABEL agent-box.entry=2
+LABEL agent-box.entry=5
 
 EOF
 }
@@ -320,6 +343,25 @@ _box_dockerfile_custom() {
     printf '\n# ---- %s\n' "$f"
     cat "$f"
   done
+}
+
+# The VOLUME paths the additions declare, from either form (VOLUME /a /b or
+# VOLUME ["/a", "/b"]). The image is rebuilt whenever the additions change, so
+# this is what the image has, without asking the runtime.
+_box_volume_paths() {
+  _box_dockerfile_custom | sed -n 's/^[[:space:]]*VOLUME[[:space:]][[:space:]]*//p' |
+    tr -d '[],"' | tr ' \t' '\n\n' | grep '^/' || true
+}
+
+# Copies each VOLUME path's built contents aside, for box-entry to fill an
+# empty volume from, and lists the paths in /etc/box-volumes. Reading a VOLUME
+# path after its VOLUME line is fine; only changes to it would be dropped.
+_box_dockerfile_seed() {
+  local paths
+  paths="$(_box_volume_paths | tr '\n' ' ')"
+  [[ -n ${paths// /} ]] || return 0
+  printf '\n# ---- seed for the VOLUME paths (see box-entry)\n'
+  printf 'RUN for p in %s; do mkdir -p "$p" "/usr/local/share/box-seed$p" && cp -a "$p/." "/usr/local/share/box-seed$p/" && echo "$p" >>/etc/box-volumes; done\n' "$paths"
 }
 
 # A profile with its own Dockerfile gets its own image (pi-box-work), so
@@ -362,6 +404,7 @@ box_build_image() {
     box_dockerfile_base
     printf '%s\n' "$tail"
     _box_dockerfile_custom
+    _box_dockerfile_seed
   } >"$ctx/Dockerfile"
 
   echo "==> building image $BOX_IMAGE${note:+ ($note)}" >&2
@@ -402,6 +445,10 @@ box_ensure_image() {
 # box_clean all    delete BOX_HOME outright, after asking
 box_clean() {
   local mode="$1" home="$BOX_HOME" tmp rel reply
+  [[ $mode != data ]] || {
+    _box_clean_data
+    return
+  }
   [[ -n $home && $home != "/" && $home != "$HOME" ]] || {
     echo "error: refusing to clean '$home'" >&2
     exit 1
@@ -436,6 +483,37 @@ box_clean() {
   rm -rf "${home:?}"
   mv "$tmp" "$home"
   echo "==> cleaned $home, now $(du -sh "$home" 2>/dev/null | cut -f1); kept ${BOX_KEEP[*]}" >&2
+}
+
+# box_clean data: delete this profile and project's service volumes, after asking.
+_box_clean_data() {
+  local prefix vols=() v reply
+  prefix="$(_box_data_prefix)"
+  while IFS= read -r v; do
+    [[ $v == "$prefix"* ]] && vols+=("$v")
+  done < <(_box_volume_names)
+  [[ ${#vols[@]} -gt 0 ]] || {
+    echo "==> no volumes for ${prefix}*" >&2
+    return 0
+  }
+  printf '  %s\n' "${vols[@]}" >&2
+  printf 'Delete these %d volume(s)? [y/N] ' "${#vols[@]}" >&2
+  read -r reply </dev/tty || reply=""
+  [[ $reply == [yY]* ]] || {
+    echo "==> cancelled" >&2
+    return 0
+  }
+  "${BOX_CTR[@]}" volume rm "${vols[@]}" >/dev/null
+  echo "==> removed ${#vols[@]} volume(s)" >&2
+}
+
+# All volume names, one per line, from either runtime.
+_box_volume_names() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    podman volume ls -q
+  else
+    container volume list --format json | grep -o '"name" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'
+  fi
 }
 
 # ------------------------------------------------------------ host alias -----
@@ -509,6 +587,21 @@ box_ensure_host_alias() {
   printf '%s' "$boot" >"$stamp"
 }
 
+# ------------------------------------------------------------------ exit -----
+# Commands to run when the script exits (bridges, locks). One EXIT trap runs
+# them all, so no caller's trap replaces another's.
+BOX_AT_EXIT=()
+_box_at_exit() {
+  BOX_AT_EXIT+=("$1")
+  trap '_box_run_at_exit' EXIT
+}
+_box_run_at_exit() {
+  local c
+  for c in ${BOX_AT_EXIT[@]+"${BOX_AT_EXIT[@]}"}; do
+    eval "$c"
+  done
+}
+
 # ---------------------------------------------------------------- bridge -----
 # True when the box is a krun microVM, where a bind-mounted Unix socket is just
 # a file to the guest kernel: connecting to it never reaches the host's listener.
@@ -523,7 +616,6 @@ _box_is_krun() {
 # can keep other users off it (tools/README.md). Keep the two in step. It sits
 # below Linux's ephemeral ports (32768+), so no outgoing connection lands there.
 BOX_BRIDGE_PORTS=(24100 100) # first port, count
-BOX_BRIDGE_PIDS=()
 _box_bridge() {
   local what="$1" sock="$2" hint="brew install socat" i p off=$RANDOM
   [[ ${BOX_CTR[0]} == podman ]] && hint="sudo pacman -S socat"
@@ -545,9 +637,8 @@ _box_bridge() {
     exit 1
   }
   socat "TCP-LISTEN:$BOX_BRIDGE_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
-  BOX_BRIDGE_PIDS+=($!)
   # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
-  trap 'kill -9 "${BOX_BRIDGE_PIDS[@]}" 2>/dev/null' EXIT
+  _box_at_exit "kill -9 $! 2>/dev/null"
 }
 
 # ---------------------------------------------------------------- docker -----
@@ -610,6 +701,75 @@ box_docker_bridge() {
   _box_bridge "${BOX_ENV_PREFIX}_DOCKER" "$sock"
   BOX_DOCKER_ENV+=(--env "DOCKER_HOST=tcp://$alias:$BOX_BRIDGE_PORT")
   echo "==> docker: $sock -> tcp://$alias:$BOX_BRIDGE_PORT (this session only)" >&2
+}
+
+# ------------------------------------------------------------------ data -----
+# Service data persists where the Dockerfile additions say VOLUME: a named
+# volume is mounted there, one set per profile and project. The project is the
+# git worktree (each worktree its own), or $PWD outside git;
+# ${BOX_ENV_PREFIX}_PROJECT names it instead. Names read like
+# agentbox-data-myapp-1234567890-var-lib-postgresql.
+_box_data_prefix() {
+  local proj dir
+  proj="$(box_knob PROJECT)"
+  if [[ -z $proj ]]; then
+    dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+    proj="$(basename "$dir" | tr -c 'A-Za-z0-9_.\n-' '-')-$(printf '%s' "$dir" | cksum | cut -d' ' -f1)"
+  fi
+  printf 'agentbox-%s-%s-' "$(box_knob PROFILE default)" "$proj"
+}
+
+# The image's agent-box.entry label, from either runtime.
+_box_entry_version() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    podman image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE"
+  else
+    container image inspect "$BOX_IMAGE" |
+      sed -n 's/.*"agent-box.entry" *: *"\([0-9]*\)".*/\1/p' | head -1
+  fi
+}
+
+# One box per volume set: two databases on one data dir corrupt it. A lock dir
+# holding this script's PID; one left by a box that died is taken over.
+_box_data_lock() {
+  local dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agentbox-locks/$1" pid
+  mkdir -p "$(dirname "$dir")"
+  if ! mkdir "$dir" 2>/dev/null; then
+    pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "error: another box (pid $pid) is using $1-* (same profile and project)" >&2
+      exit 1
+    fi
+    rm -rf "$dir"
+    mkdir "$dir" || {
+      echo "error: could not lock $1-*" >&2
+      exit 1
+    }
+  fi
+  echo $$ >"$dir/pid"
+  _box_at_exit "rm -rf '$dir'"
+}
+
+_box_data_volumes() {
+  local prefix p name n=0 info
+  [[ -n "$(_box_volume_paths)" ]] || return 0
+  info="$(_box_entry_version)"
+  [[ ${info:-0} -ge 5 ]] || {
+    echo "error: $BOX_IMAGE predates the box-entry persisted data needs; rerun with --rebuild" >&2
+    exit 1
+  }
+  prefix="$(_box_data_prefix)"
+  _box_data_lock "${prefix%-}"
+  while IFS= read -r p; do
+    name="$prefix$(printf '%s' "${p#/}" | tr -c 'A-Za-z0-9_.\n-' '-')"
+    # podman creates a missing volume on first use; Apple's container doesn't.
+    if [[ ${BOX_CTR[0]} == container ]] && ! container volume inspect "$name" >/dev/null 2>&1; then
+      container volume create "$name" >/dev/null
+    fi
+    BOX_RUN_ARGS+=(--volume "$name:$p")
+    n=$((n + 1))
+  done < <(_box_volume_paths)
+  echo "==> data: $n volume(s), ${prefix}*" >&2
 }
 
 # ------------------------------------------------------------- run flags -----
@@ -743,6 +903,7 @@ box_run_args() {
     ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
   _box_runtime_args
+  _box_data_volumes
   if [[ -n "$(box_knob SSH)" ]]; then
     if [[ ${BOX_CTR[0]} == podman ]]; then
       # podman has no --ssh; mount the agent socket at a fixed path instead.
@@ -773,11 +934,11 @@ box_run_args() {
 #
 # With --shell (BOX_SHELL=1) the same box starts bash instead of the agent, for
 # poking at it by hand: bash goes in at the first argument naming $BOX_IMAGE,
-# and whatever follows goes to it (`claude-box --shell -c 'uname -a'`). On
-# podman it still runs behind box-entry, so hooks and the ssh bridge are up.
+# and whatever follows goes to it (`claude-box --shell -c 'uname -a'`). It
+# still runs behind box-entry, so volumes, hooks and the ssh bridge are up; an
+# image from before box-entry gets plain bash instead.
 #
-# --shell and BOX_ENTRY=1 (set by box_run_args for --ssh under krun) need an
-# image with today's box-entry; podman can check its label.
+# BOX_ENTRY=1 (set by box_run_args for --ssh under krun) needs box-entry.
 box_run() {
   [[ ${BOX_SHELL:-0} -eq 1 || ${BOX_ENTRY:-0} -eq 1 ]] || {
     "${BOX_CTR[@]}" run "$@"
@@ -788,21 +949,20 @@ box_run() {
     args+=("$1")
     shift
   done
-  if [[ ${BOX_CTR[0]} == podman ]]; then
-    info="$(podman image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE")"
-    [[ $info == 2 ]] || {
-      echo "error: $BOX_IMAGE predates the current box-entry; rerun with --rebuild" >&2
-      exit 1
-    }
+  info="$(_box_entry_version)"
+  if [[ ${info:-0} -lt 2 && ${BOX_ENTRY:-0} -eq 1 ]]; then
+    echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --rebuild" >&2
+    exit 1
   fi
   [[ ${BOX_SHELL:-0} -eq 1 ]] || {
     "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} "$@"
     return
   }
   echo "==> --shell: bash instead of the agent" >&2
-  if [[ ${BOX_CTR[0]} == podman ]]; then
+  if [[ ${info:-0} -ge 2 ]]; then
     "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint /usr/local/bin/box-entry "$1" bash "${@:2}"
   else
+    echo "==> $BOX_IMAGE predates box-entry: no hooks (--rebuild to get them)" >&2
     "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint bash "$@"
   fi
 }

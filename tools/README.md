@@ -124,6 +124,7 @@ does not (it writes to `/usr`).
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM size (default 4 / 4G; krun wants `M` or `G`) |
 | `*_BOX_SSH`, `*_BOX_DOCKER`, `*_BOX_SEARCH`, `*_BOX_PROFILE` | same as the flags |
 | `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`; `crun` for no VM) |
+| `*_BOX_PROJECT` | name the project for persisted service data (default: git worktree or `$PWD`) |
 | `*_BOX_DOCKER_SOCK` | Docker socket (default: colima etc. on a Mac, your podman socket on Linux) |
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | Mac: the host-loopback DNS name and IP |
 
@@ -159,16 +160,33 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends redis-server postgresql-$PG mongodb-org-server \
  && rm -rf /var/lib/apt/lists/* \
- && sed -i 's/scram-sha-256$/trust/' /etc/postgresql/$PG/main/pg_hba.conf
+ && sed -i 's/scram-sha-256$/trust/' /etc/postgresql/$PG/main/pg_hba.conf \
+ && mkdir -p /var/lib/redis /var/lib/mongodb
 
-# Started on every launch. Data lives in the box, so each launch starts empty.
-RUN printf '%s\n' '#!/bin/sh' \
-      'redis-server --daemonize yes >/dev/null' \
+# Started before the agent, stopped cleanly after it.
+RUN printf '%s\n' '#!/bin/sh' 'set -e' \
+      'redis-server --daemonize yes --dir /var/lib/redis >/dev/null' \
       "pg_ctlcluster $PG main start" \
-      'mkdir -p /tmp/mongo && mongod --fork --dbpath /tmp/mongo --logpath /tmp/mongo.log >/dev/null' \
+      'mongod --fork --dbpath /var/lib/mongodb --logpath /var/log/mongod.log >/dev/null' \
       >/etc/box-entry.d/10-services \
- && chmod +x /etc/box-entry.d/10-services
+ && printf '%s\n' '#!/bin/sh' \
+      'redis-cli shutdown save >/dev/null' \
+      "pg_ctlcluster $PG main stop" \
+      'mongod --shutdown --dbpath /var/lib/mongodb >/dev/null' \
+      >/etc/box-exit.d/10-services \
+ && chmod +x /etc/box-entry.d/10-services /etc/box-exit.d/10-services
+
+# Keep the data between launches. Last, as later RUNs can't change these paths.
+VOLUME /var/lib/postgresql /var/lib/redis /var/lib/mongodb
 ```
+
+Each `VOLUME` path persists in a named volume, one set per profile and
+project; an empty one starts with what the image had there. The project is the
+git worktree you launch in (each worktree gets its own databases), or `$PWD`
+outside git; `*_BOX_PROJECT=name` picks one by name instead. Only one box at a
+time can use a set, and `--clean-data` deletes it. Hooks in `/etc/box-exit.d/`
+run after the agent exits, so the services shut down cleanly. A failing
+`box-entry.d` hook stops the box before the agent starts.
 
 Change `PG` to pick the PostgreSQL major (the boxes pass no `--build-arg`, so
 edit it here); PGDG builds each one for the image's own Ubuntu release.
@@ -185,7 +203,7 @@ To change the shared base for everyone, edit `box_dockerfile_base` in
 ## Flags
 
 Shared: `--rebuild`, `--build-only`, `--ssh`, `--docker`, `--search`,
-`--profile NAME`, `--clean`, `--clean-all`, `--shell`. pi-box, opencode-box
+`--profile NAME`, `--clean`, `--clean-all`, `--clean-data`, `--shell`. pi-box, opencode-box
 and ocr-box add `--sync` / `--sync-only` to refresh the model list from the
 server. Everything else goes to the agent.
 
@@ -195,7 +213,8 @@ server. Everything else goes to the agent.
 - `--shell` runs bash instead of the agent, same everything else:
   `pi-box --shell -c 'uname -a'`.
 - `--clean` drops runtimes and caches but keeps the login; `--clean-all`
-  deletes the whole home (asks first).
+  deletes the whole home (asks first); `--clean-data` deletes this profile and
+  project's service data (asks first).
 
 ## Mac: the once-per-boot sudo
 

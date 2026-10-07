@@ -17,6 +17,7 @@
 #                                into the box (same as AGY_BOX_PROFILE; or --profile NAME)
 #   agy-box --clean              drop the box's runtimes and caches, keep its login
 #   agy-box --clean-all          delete AGY_BOX_HOME entirely (asks first)
+#   agy-box --clean-data         delete this profile and project's service data (asks first)
 #   agy-box --shell [args]       bash in the box instead of the agent, for debugging
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
