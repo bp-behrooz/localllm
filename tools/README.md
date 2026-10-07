@@ -138,10 +138,45 @@ own image, e.g. `pi-box-work`). Both are appended, in that order, after the
 box's own steps. Use `RUN`/`ENV`, not `COPY` (the build context is empty). The
 next launch rebuilds when either changes.
 
+Executables in `/etc/box-entry.d/` run before the agent starts, so a profile
+can bring its own services. For example, `~/.box.data.dockerfile` for
+`--profile data`, with Redis, PostgreSQL and MongoDB inside the box:
+
 ```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \
- && rm -rf /var/lib/apt/lists/*
+# Redis from Ubuntu; PostgreSQL (a chosen major) and MongoDB from their own repos
+ARG PG=17
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gnupg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+      >/etc/apt/sources.list.d/pgdg.list \
+ && curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc \
+      | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" \
+      >/etc/apt/sources.list.d/mongodb.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends redis-server postgresql-$PG mongodb-org-server \
+ && rm -rf /var/lib/apt/lists/* \
+ && sed -i 's/scram-sha-256$/trust/' /etc/postgresql/$PG/main/pg_hba.conf
+
+# Started on every launch. Data lives in the box, so each launch starts empty.
+RUN printf '%s\n' '#!/bin/sh' \
+      'redis-server --daemonize yes >/dev/null' \
+      "pg_ctlcluster $PG main start" \
+      'mkdir -p /tmp/mongo && mongod --fork --dbpath /tmp/mongo --logpath /tmp/mongo.log >/dev/null' \
+      >/etc/box-entry.d/10-services \
+ && chmod +x /etc/box-entry.d/10-services
 ```
+
+Change `PG` to pick the PostgreSQL major (the boxes pass no `--build-arg`, so
+edit it here); PGDG builds each one for the image's own Ubuntu release.
+MongoDB's 26.04 repo is still empty, so it comes from 24.04's (`noble`), whose
+server package needs nothing 26.04 lacks. The agent reaches the databases on
+`localhost` (`psql -h localhost -U postgres`, `redis-cli`, `mongosh` if you add
+it). Mind `*_BOX_MEMORY`: three databases and an agent want more than the
+default 4G.
 
 To change the shared base for everyone, edit `box_dockerfile_base` in
 [`agent-box-lib.bash`](agent-box-lib.bash), then `--build-only` (cached) or

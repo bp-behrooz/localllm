@@ -282,18 +282,22 @@ RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 # would silently do nothing. The shim dir works for both.
 ENV PATH=/root/.local/share/mise/shims:$PATH
 
-# box-entry runs ahead of the agent when the host asks for it (see box_run).
-# Under krun the ssh-agent arrives as a TCP port on the host, since a
-# bind-mounted Unix socket doesn't cross the VM boundary; turn it back into the
-# socket ssh expects, then hand over. The label tells the host this image has it.
-RUN printf '%s\n' '#!/bin/sh' \
+# box-entry runs ahead of the agent (box_build_image puts it in front of the
+# agent's ENTRYPOINT). Under krun the ssh-agent arrives as a TCP port on the
+# host, since a bind-mounted Unix socket doesn't cross the VM boundary; turn it
+# back into the socket ssh expects. Then run the hooks in /etc/box-entry.d (a
+# profile's Dockerfile can start services there) and hand over. The label tells
+# the host this image has it.
+RUN mkdir -p /etc/box-entry.d \
+ && printf '%s\n' '#!/bin/sh' \
       'if [ -n "$BOX_SSH_AGENT_TCP" ]; then' \
       '  socat "UNIX-LISTEN:$SSH_AUTH_SOCK,fork,unlink-early,mode=600" "TCP:$BOX_SSH_AGENT_TCP" &' \
       '  i=0; while [ ! -S "$SSH_AUTH_SOCK" ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i + 1)); done' \
       'fi' \
+      'for f in /etc/box-entry.d/*; do [ -x "$f" ] && "$f"; done' \
       'exec "$@"' >/usr/local/bin/box-entry \
  && chmod +x /usr/local/bin/box-entry
-LABEL agent-box.entry=1
+LABEL agent-box.entry=2
 
 EOF
 }
@@ -341,14 +345,22 @@ box_build_image() {
   # Cleaned up by hand rather than with a RETURN trap: bash leaves such a trap
   # registered after the function returns, and it would fire again — with $ctx
   # long gone — when box_ensure_image returns.
-  local ctx note="${1-}" rc=0 nocache=()
+  local ctx note="${1-}" rc=0 nocache=() tail
   # --rebuild: skip the layer cache, else `npm install ...@latest` is reused stale
   [[ ${2-0} -eq 1 ]] && nocache=(--no-cache)
+  # box-entry goes in front of the agent. Only the exec form can be rewritten,
+  # and a tail that slipped through would pass box_run's label check (the label
+  # is in the base) while skipping the ssh bridge and hooks, so insist on it.
+  tail="$(box_dockerfile_agent | sed 's|^ENTRYPOINT \["|ENTRYPOINT ["/usr/local/bin/box-entry", "|')"
+  [[ $tail == *'ENTRYPOINT ["/usr/local/bin/box-entry", '* ]] || {
+    echo "error: $BOX_IMAGE's Dockerfile tail needs an exec-form ENTRYPOINT [\"...\"]" >&2
+    return 1
+  }
   ctx=$(mktemp -d)
 
   {
     box_dockerfile_base
-    box_dockerfile_agent
+    printf '%s\n' "$tail"
     _box_dockerfile_custom
   } >"$ctx/Dockerfile"
 
@@ -760,36 +772,37 @@ box_run_args() {
 # naming the CLI.
 #
 # With --shell (BOX_SHELL=1) the same box starts bash instead of the agent, for
-# poking at it by hand: the image's entrypoint is swapped out at the first
-# argument naming $BOX_IMAGE, and whatever follows goes to bash
-# (`claude-box --shell -c 'uname -a'`).
+# poking at it by hand: bash goes in at the first argument naming $BOX_IMAGE,
+# and whatever follows goes to it (`claude-box --shell -c 'uname -a'`). On
+# podman it still runs behind box-entry, so hooks and the ssh bridge are up.
 #
-# With BOX_ENTRY=1 (set by box_run_args for --ssh under krun) the entrypoint,
-# the agent's or bash, is put behind the image's box-entry instead.
+# --shell and BOX_ENTRY=1 (set by box_run_args for --ssh under krun) need an
+# image with today's box-entry; podman can check its label.
 box_run() {
   [[ ${BOX_SHELL:-0} -eq 1 || ${BOX_ENTRY:-0} -eq 1 ]] || {
     "${BOX_CTR[@]}" run "$@"
     return
   }
-  local args=() ep=bash info
+  local args=() info
   while [[ $# -gt 0 && $1 != "$BOX_IMAGE" ]]; do
     args+=("$1")
     shift
   done
-  [[ ${BOX_SHELL:-0} -eq 1 ]] && echo "==> --shell: bash instead of the agent" >&2
-  if [[ ${BOX_ENTRY:-0} -eq 1 ]]; then
-    # podman-only, so the JSON form of --entrypoint is safe here
-    if [[ ${BOX_SHELL:-0} -eq 1 ]]; then
-      ep='["bash"]'
-    else
-      ep="$("${BOX_CTR[@]}" image inspect --format '{{json .Config.Entrypoint}}' "$BOX_IMAGE")"
-    fi
-    info="$("${BOX_CTR[@]}" image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE")"
-    [[ $info == 1 ]] || {
-      echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --rebuild" >&2
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    info="$(podman image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE")"
+    [[ $info == 2 ]] || {
+      echo "error: $BOX_IMAGE predates the current box-entry; rerun with --rebuild" >&2
       exit 1
     }
-    ep='["/usr/local/bin/box-entry",'"${ep#[}"
   fi
-  "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint "$ep" "$@"
+  [[ ${BOX_SHELL:-0} -eq 1 ]] || {
+    "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} "$@"
+    return
+  }
+  echo "==> --shell: bash instead of the agent" >&2
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint /usr/local/bin/box-entry "$1" bash "${@:2}"
+  else
+    "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint bash "$@"
+  fi
 }
