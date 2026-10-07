@@ -144,7 +144,8 @@ and ocr-box add `--sync` / `--sync-only` to refresh the model list from the
 server. Everything else goes to the agent.
 
 - `--profile NAME` passes the variables from `<box home>/.env.NAME` (lines like
-  `export FOO=bar`) into the box.
+  `export FOO=bar`) into the box. `.env.default` is always read if it exists,
+  with `NAME` on top.
 - `--shell` runs bash instead of the agent, same everything else:
   `pi-box --shell -c 'uname -a'`.
 - `--clean` drops runtimes and caches but keeps the login; `--clean-all`

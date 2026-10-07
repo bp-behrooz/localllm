@@ -564,20 +564,25 @@ _box_gh_env() {
   fi
 }
 
-# _box_profile: if the script's flag set *_BOX_PROFILE, read
-# $BOX_HOME/.env.<name> (shell lines, e.g. `export SOME_VAR=SOME_VAL`) and
-# pass each variable into the box by name only, so the value stays out of the
-# host's process list.
+# _box_profile: read $BOX_HOME/.env.default if it exists, then the profile the
+# script's flag set in *_BOX_PROFILE (which must exist) on top of it. Each is
+# shell lines, e.g. `export SOME_VAR=SOME_VAL`; every variable goes into the box
+# by name only, so the value stays out of the host's process list.
 _box_profile() {
-  local name file line n=0
+  local name
+  BOX_PROFILE_ENV=()
+  [[ -f "$BOX_HOME/.env.default" ]] && _box_profile_load default
   name="$(box_knob PROFILE "")"
-  [[ -n $name ]] || return 0
-  file="$BOX_HOME/.env.$name"
-  [[ -f $file ]] || {
-    echo "error: profile '$name' not found: $file" >&2
+  [[ -n $name && $name != default ]] || return 0
+  [[ -f "$BOX_HOME/.env.$name" ]] || {
+    echo "error: profile '$name' not found: $BOX_HOME/.env.$name" >&2
     exit 1
   }
-  BOX_PROFILE_ENV=()
+  _box_profile_load "$name"
+}
+
+_box_profile_load() {
+  local name="$1" line n=0
   while IFS= read -r line || [[ -n $line ]]; do
     line="${line#export }"
     [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
@@ -586,7 +591,7 @@ _box_profile() {
     eval "export $line"
     BOX_PROFILE_ENV+=(--env "${BASH_REMATCH[1]}")
     n=$((n + 1))
-  done <"$file"
+  done <"$BOX_HOME/.env.$name"
   echo "==> profile $name: $n var(s) passed" >&2
 }
 
