@@ -128,7 +128,7 @@ Every box reads the same knobs under its own prefix — `CL_BOX_` for claude-box
 | `*_BOX_SSH` | forward your ssh-agent in, and pass `gh auth token` along |
 | `*_BOX_SEARCH` | enable Tavily web search / fetch tools (needs `TAVILY_API_KEY`) |
 | `*_BOX_PROFILE` | read the box home's `.env.<name>` (lines like `export SOME_VAR=SOME_VAL`) and pass its variables in |
-| `*_BOX_DOCKER` | let the agent drive the host's Docker engine |
+| `*_BOX_DOCKER` | let the agent drive the host's Docker engine (or `--docker`) |
 | `*_BOX_DOCKER_SOCK` | which Docker socket (auto-detected: colima first on a Mac, your podman socket on Linux) |
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | the localhost DNS domain used for that |
 
@@ -193,7 +193,7 @@ first-ever `container system dns` setup still prompts.
 
 ## Flags
 
-Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--search`,
+Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--docker`, `--search`,
 `--profile NAME` (or `--profile=NAME`), `--clean`, `--clean-all`, `--shell`. The boxes that
 use this repo's server (pi-box, opencode-box, ocr-box) add `--sync` and
 `--sync-only`, which re-read the served model list from the LLM server and

@@ -56,7 +56,7 @@ box_knob() {
 
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
-#   --rebuild, --build-only, --clean, --clean-all, --ssh, --search,
+#   --rebuild, --build-only, --clean, --clean-all, --ssh, --docker, --search,
 #   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
@@ -90,6 +90,10 @@ box_parse_args() {
       ;;
     --ssh)
       printf -v "${BOX_ENV_PREFIX}_SSH" '%s' 1
+      shift
+      ;;
+    --docker)
+      printf -v "${BOX_ENV_PREFIX}_DOCKER" '%s' 1
       shift
       ;;
     --search)

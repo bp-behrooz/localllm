@@ -10,6 +10,8 @@
 #   claude-box --build-only        (re)build the image and exit
 #   claude-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                 host's gh token along (same as CL_BOX_SSH=1)
+#   claude-box --docker [args...]  let the agent use the host's Docker / podman
+#                                 (same as CL_BOX_DOCKER=1)
 #   claude-box --profile=NAME      read $CL_BOX_HOME/.env.NAME (lines like
 #                                 `export SOME_VAR=SOME_VAL`) and pass its
 #                                 variables into the box (same as CL_BOX_PROFILE; or --profile NAME)

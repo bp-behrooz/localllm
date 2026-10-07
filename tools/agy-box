@@ -11,6 +11,8 @@
 #   agy-box --build-only         (re)build the image and exit
 #   agy-box --ssh [args...]      forward your ssh-agent into the box, and pass the
 #                                host's gh token along (same as AGY_BOX_SSH=1)
+#   agy-box --docker [args...]   let the agent use the host's Docker / podman
+#                                (same as AGY_BOX_DOCKER=1)
 #   agy-box --profile=NAME       read $AGY_BOX_HOME/.env.NAME and pass its variables
 #                                into the box (same as AGY_BOX_PROFILE; or --profile NAME)
 #   agy-box --clean              drop the box's runtimes and caches, keep its login
