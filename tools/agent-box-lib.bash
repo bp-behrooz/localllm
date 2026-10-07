@@ -30,7 +30,8 @@
 #
 #   box_dockerfile_agent   writes the agent-specific Dockerfile tail (its
 #                          `npm install -g`, any ENV, the ENTRYPOINT) to stdout;
-#                          box_build_image appends it to the shared base.
+#                          box_build_image appends it to the shared base,
+#                          followed by ~/.box.default.dockerfile and ~/.box.<profile>.dockerfile.
 
 [[ ${BASH_SOURCE[0]} != "$0" ]] || {
   echo "error: agent-box-lib.bash is a library; source it from a *-box script." >&2
@@ -137,6 +138,15 @@ box_parse_args() {
   done
 
   BOX_ARGS=("$@")
+
+  # The name becomes part of file paths (.env.NAME, ~/.box.NAME.dockerfile)
+  # and an image tag, so keep it to a plain word.
+  local profile
+  profile="$(box_knob PROFILE)"
+  [[ -z $profile || $profile =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || {
+    echo "error: profile name '$profile': use letters, digits, '_', '.' and '-'" >&2
+    exit 1
+  }
 }
 
 # --------------------------------------------------------------- runtime -----
@@ -288,6 +298,44 @@ LABEL agent-box.entry=1
 EOF
 }
 
+# Your own additions to the image, appended after the agent's tail:
+# ~/.box.default.dockerfile for every image, then ~/.box.<profile>.dockerfile
+# for the profile *_BOX_PROFILE names, as with .env.default and .env.<profile>.
+# The build context is empty, so RUN/ENV, not COPY.
+_box_profile_dockerfile() {
+  local name
+  name="$(box_knob PROFILE "")"
+  [[ -n $name && $name != default ]] || return 0
+  printf '%s' "$HOME/.box.$name.dockerfile"
+}
+
+_box_dockerfile_custom() {
+  local f
+  for f in "$HOME/.box.default.dockerfile" "$(_box_profile_dockerfile)"; do
+    [[ -n $f && -f $f ]] || continue
+    printf '\n# ---- %s\n' "$f"
+    cat "$f"
+  done
+}
+
+# A profile with its own Dockerfile gets its own image (pi-box-work), so
+# switching profiles doesn't rebuild every time. Called before anything uses
+# BOX_IMAGE; BOX_IMAGE_BASE keeps the script's own name so a second call
+# doesn't stack tags.
+_box_profile_image() {
+  local f
+  BOX_IMAGE="${BOX_IMAGE_BASE:=$BOX_IMAGE}"
+  f="$(_box_profile_dockerfile)"
+  [[ -n $f && -f $f ]] || return 0
+  BOX_IMAGE="$BOX_IMAGE_BASE-$(box_knob PROFILE | tr 'A-Z' 'a-z')"
+}
+
+# Where the checksum of the additions an image was built with is kept, so a
+# launch can tell they changed. Missing means none.
+_box_custom_stamp() {
+  printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/$BOX_IMAGE.custom"
+}
+
 # box_build_image [note]   note is shown in the build banner, e.g. "pi@latest"
 box_build_image() {
   # Cleaned up by hand rather than with a RETURN trap: bash leaves such a trap
@@ -301,21 +349,37 @@ box_build_image() {
   {
     box_dockerfile_base
     box_dockerfile_agent
+    _box_dockerfile_custom
   } >"$ctx/Dockerfile"
 
   echo "==> building image $BOX_IMAGE${note:+ ($note)}" >&2
   "${BOX_CTR[@]}" build ${nocache[@]+"${nocache[@]}"} --tag "$BOX_IMAGE" "$ctx" || rc=$?
   rm -rf "$ctx"
+  if [[ $rc -eq 0 ]]; then
+    mkdir -p "$(dirname "$(_box_custom_stamp)")"
+    _box_dockerfile_custom | cksum >"$(_box_custom_stamp)"
+  fi
   return "$rc"
+}
+
+# True when the Dockerfile additions differ from what the image was built with.
+_box_custom_changed() {
+  local built
+  built="$(cat "$(_box_custom_stamp)" 2>/dev/null || printf '' | cksum)"
+  [[ "$(_box_dockerfile_custom | cksum)" != "$built" ]]
 }
 
 # box_ensure_image $REBUILD $BUILD_ONLY [note]
 box_ensure_image() {
   local rebuild="$1" build_only="$2" note="${3-}"
+  _box_profile_image
   if [[ $rebuild -eq 1 ]]; then
     box_remove_images
     box_build_image "$note" 1
   elif [[ $build_only -eq 1 ]] || ! box_have_image; then
+    box_build_image "$note"
+  elif _box_custom_changed; then
+    echo "==> your Dockerfile additions changed" >&2
     box_build_image "$note"
   fi
 }

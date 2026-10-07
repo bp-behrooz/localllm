@@ -131,10 +131,21 @@ Each script's header lists its own extras (models, approval prompts, ...).
 pi-box, opencode-box and ocr-box also read `LOCAL_LLM_URL` and
 `LOCAL_LLM_API_KEY`, unprefixed.
 
-**4. The image.** For apt packages or anything outside `$HOME`, edit
-`box_dockerfile_base` in [`agent-box-lib.bash`](agent-box-lib.bash) (shared by
-all boxes), then `--build-only` (cached) or `--rebuild` (from scratch). A plain
-launch won't pick it up.
+**4. The image.** For apt packages or anything outside `$HOME`, add
+Dockerfile lines to `~/.box.default.dockerfile` (every box) and/or
+`~/.box.<profile>.dockerfile` (with `--profile <profile>`, which then gets its
+own image, e.g. `pi-box-work`). Both are appended, in that order, after the
+box's own steps. Use `RUN`/`ENV`, not `COPY` (the build context is empty). The
+next launch rebuilds when either changes.
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+To change the shared base for everyone, edit `box_dockerfile_base` in
+[`agent-box-lib.bash`](agent-box-lib.bash), then `--build-only` (cached) or
+`--rebuild` (from scratch).
 
 ## Flags
 
