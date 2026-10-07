@@ -23,7 +23,7 @@
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
-# _HOST_ALIAS_IP, _SSH, _SEARCH, _CPUS, _MEMORY and _PROFILE, and names that same
+# _HOST_ALIAS_IP, _SSH, _SEARCH, _CPUS, _MEMORY, _PROFILE and _RUNTIME, and names that same
 # variable when it has to complain about it.
 #
 # ...and defines one function:
@@ -140,6 +140,16 @@ box_parse_args() {
 }
 
 # --------------------------------------------------------------- runtime -----
+# podman's OCI runtime for `run`: krun (a microVM) unless ${BOX_ENV_PREFIX}_RUNTIME
+# names another, e.g. crun for a plain container. On a Mac only what was set.
+box_runtime() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    box_knob RUNTIME krun
+  else
+    box_knob RUNTIME
+  fi
+}
+
 box_require_runtime() {
   if [[ ${BOX_CTR[0]} == podman ]]; then
     command -v podman >/dev/null 2>&1 || {
@@ -159,6 +169,21 @@ box_require_runtime() {
       echo "error: podman is not rootless here; run the box as your own user (see tools/README.md)" >&2
       exit 1
     }
+    # krun boots each container as a libkrun microVM over KVM: the agent gets
+    # its own kernel instead of sharing the host's, much like the Mac's VM.
+    # It is the default, so say how to opt out rather than quietly drop the VM.
+    if [[ "$(box_runtime)" == krun ]]; then
+      command -v krun >/dev/null 2>&1 || {
+        echo "error: the box runs under krun, which isn't installed: sudo pacman -S krun" >&2
+        echo "       (or ${BOX_ENV_PREFIX}_RUNTIME=crun for a plain container, no VM)" >&2
+        exit 1
+      }
+      [[ -r /dev/kvm && -w /dev/kvm ]] || {
+        echo "error: the box runs under krun, which needs read/write on /dev/kvm (the kvm group)" >&2
+        echo "       (or ${BOX_ENV_PREFIX}_RUNTIME=crun for a plain container, no VM)" >&2
+        exit 1
+      }
+    fi
     return 0
   fi
 
@@ -222,7 +247,7 @@ RUN sed -i 's|http://|https://|' /etc/apt/sources.list.d/ubuntu.sources \
  && apt-get -o Acquire::https::Verify-Peer=false update \
  && apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends \
       build-essential ca-certificates curl git ripgrep fd-find jq openssh-client \
-      python3 unzip less nodejs npm \
+      python3 unzip less nodejs npm socat \
       docker.io docker-compose-v2 docker-buildx \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
@@ -246,6 +271,19 @@ RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 # and an agent runs every command through a non-interactive `bash -c`, where it
 # would silently do nothing. The shim dir works for both.
 ENV PATH=/root/.local/share/mise/shims:$PATH
+
+# box-entry runs ahead of the agent when the host asks for it (see box_run).
+# Under krun the ssh-agent arrives as a TCP port on the host, since a
+# bind-mounted Unix socket doesn't cross the VM boundary; turn it back into the
+# socket ssh expects, then hand over. The label tells the host this image has it.
+RUN printf '%s\n' '#!/bin/sh' \
+      'if [ -n "$BOX_SSH_AGENT_TCP" ]; then' \
+      '  socat "UNIX-LISTEN:$SSH_AUTH_SOCK,fork,unlink-early,mode=600" "TCP:$BOX_SSH_AGENT_TCP" &' \
+      '  i=0; while [ ! -S "$SSH_AUTH_SOCK" ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i + 1)); done' \
+      'fi' \
+      'exec "$@"' >/usr/local/bin/box-entry \
+ && chmod +x /usr/local/bin/box-entry
+LABEL agent-box.entry=1
 
 EOF
 }
@@ -325,9 +363,22 @@ box_clean() {
 }
 
 # ------------------------------------------------------------ host alias -----
+# The address the box reaches host loopback by. On podman (only bridged under
+# krun) it is a link-local IP that pasta maps to the host's 127.0.0.1 (see
+# _box_runtime_args); podman's own host.containers.internal won't do, as it
+# lands on the host's LAN address. On a Mac it is a localhost DNS domain
+# (box_ensure_host_alias).
+BOX_PASTA_LOOPBACK=169.254.1.3
+box_host_alias() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    printf '%s' "$BOX_PASTA_LOOPBACK"
+  else
+    box_knob HOST_ALIAS host.container.internal
+  fi
+}
+
 box_ensure_host_alias() {
-  # macOS-only: on Linux the podman socket bind-mounts straight into the box
-  # (see box_docker_bridge), so there is no loopback domain to set up.
+  # macOS-only: podman already resolves its alias to host loopback.
   [[ ${BOX_CTR[0]} == container ]] || return 0
 
   # A "localhost domain" is two host-side things: /etc/resolver/containerization.<domain>
@@ -382,6 +433,47 @@ box_ensure_host_alias() {
   printf '%s' "$boot" >"$stamp"
 }
 
+# ---------------------------------------------------------------- bridge -----
+# True when the box is a krun microVM, where a bind-mounted Unix socket is just
+# a file to the guest kernel: connecting to it never reaches the host's listener.
+_box_is_krun() {
+  [[ ${BOX_CTR[0]} == podman && "$(box_runtime)" == krun ]]
+}
+
+# _box_bridge WHAT SOCK: serve the Unix socket SOCK on a free host-loopback port
+# in BOX_BRIDGE_PORTS, for a VM that can't connect to it directly, and set
+# BOX_BRIDGE_PORT. The listener lives as long as this script. Any local user can
+# connect to 127.0.0.1, which is why the range is fixed and small: one nft rule
+# can keep other users off it (tools/README.md). Keep the two in step. It sits
+# below Linux's ephemeral ports (32768+), so no outgoing connection lands there.
+BOX_BRIDGE_PORTS=(24100 100) # first port, count
+BOX_BRIDGE_PIDS=()
+_box_bridge() {
+  local what="$1" sock="$2" hint="brew install socat" i p off=$RANDOM
+  [[ ${BOX_CTR[0]} == podman ]] && hint="sudo pacman -S socat"
+  command -v socat >/dev/null || {
+    echo "error: $what needs socat ($hint)" >&2
+    exit 1
+  }
+  # Start at a random offset so concurrent launches rarely race for one port;
+  # a port is free when nothing answers on it.
+  BOX_BRIDGE_PORT=
+  for ((i = 0; i < BOX_BRIDGE_PORTS[1]; i++)); do
+    p=$((BOX_BRIDGE_PORTS[0] + (off + i) % BOX_BRIDGE_PORTS[1]))
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && continue
+    BOX_BRIDGE_PORT=$p
+    break
+  done
+  [[ -n $BOX_BRIDGE_PORT ]] || {
+    echo "error: $what: no free port in $BOX_BRIDGE_PORTS-$((BOX_BRIDGE_PORTS[0] + BOX_BRIDGE_PORTS[1] - 1))" >&2
+    exit 1
+  }
+  socat "TCP-LISTEN:$BOX_BRIDGE_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
+  BOX_BRIDGE_PIDS+=($!)
+  # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
+  trap 'kill -9 "${BOX_BRIDGE_PIDS[@]}" 2>/dev/null' EXIT
+}
+
 # ---------------------------------------------------------------- docker -----
 box_docker_bridge() {
   # Expose the host's Docker to the box. On a Mac, Unix sockets can't be
@@ -389,8 +481,8 @@ box_docker_bridge() {
   # gateway IP by default. Apple's supported route is a "localhost" DNS domain:
   # it installs a pf rule that redirects a chosen IP to the Mac's loopback, so
   # we listen on 127.0.0.1 with socat and let the box connect by name. On Linux
-  # none of that exists: podman's Docker-compatible socket mounts straight in,
-  # no socat, no sudo.
+  # podman's Docker-compatible socket mounts straight in, no socat, no sudo,
+  # except under krun, whose VM gets the same socat bridge as the Mac.
   #
   # NOTE: whatever the daemon can reach on the host (colima: its mount list), the
   # agent can reach through docker.
@@ -413,42 +505,35 @@ box_docker_bridge() {
       echo "       systemctl --user enable --now podman.socket, or set ${BOX_ENV_PREFIX}_DOCKER_SOCK" >&2
       exit 1
     }
-    # The image's docker CLI already defaults to unix:///var/run/docker.sock.
-    BOX_DOCKER_ENV+=(--volume "$sock:/var/run/docker.sock")
-    echo "==> docker: $sock -> /var/run/docker.sock (this session only)" >&2
-    return 0
+    if ! _box_is_krun; then
+      # The image's docker CLI already defaults to unix:///var/run/docker.sock.
+      BOX_DOCKER_ENV+=(--volume "$sock:/var/run/docker.sock")
+      echo "==> docker: $sock -> /var/run/docker.sock (this session only)" >&2
+      return 0
+    fi
+  else
+    sock="$(box_knob DOCKER_SOCK)"
+    if [[ -z "$sock" ]]; then
+      for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
+        "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
+        [[ -S "$c" ]] && {
+          sock="$c"
+          break
+        }
+      done
+    fi
+    [[ -S "${sock:-}" ]] || {
+      echo "error: no Docker socket found; set ${BOX_ENV_PREFIX}_DOCKER_SOCK" >&2
+      exit 1
+    }
   fi
-
-  sock="$(box_knob DOCKER_SOCK)"
-  if [[ -z "$sock" ]]; then
-    for c in "$HOME/.colima/default/docker.sock" "$HOME/.docker/run/docker.sock" \
-      "$HOME/.orbstack/run/docker.sock" /var/run/docker.sock; do
-      [[ -S "$c" ]] && {
-        sock="$c"
-        break
-      }
-    done
-  fi
-  [[ -S "${sock:-}" ]] || {
-    echo "error: no Docker socket found; set ${BOX_ENV_PREFIX}_DOCKER_SOCK" >&2
-    exit 1
-  }
-
-  command -v socat >/dev/null || {
-    echo "error: ${BOX_ENV_PREFIX}_DOCKER needs socat (brew install socat)" >&2
-    exit 1
-  }
 
   local alias
-  alias="$(box_knob HOST_ALIAS host.container.internal)"
+  alias="$(box_host_alias)"
   box_ensure_host_alias "$alias"
-
-  local port=$((20000 + RANDOM % 20000))
-  socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
-  BOX_SOCAT_PID=$!
-  trap 'kill -9 "$BOX_SOCAT_PID" 2>/dev/null' EXIT   # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
-  BOX_DOCKER_ENV=(--env "DOCKER_HOST=tcp://$alias:$port")
-  echo "==> docker: $sock -> tcp://$alias:$port (this session only)" >&2
+  _box_bridge "${BOX_ENV_PREFIX}_DOCKER" "$sock"
+  BOX_DOCKER_ENV+=(--env "DOCKER_HOST=tcp://$alias:$BOX_BRIDGE_PORT")
+  echo "==> docker: $sock -> tcp://$alias:$BOX_BRIDGE_PORT (this session only)" >&2
 }
 
 # ------------------------------------------------------------- run flags -----
@@ -505,6 +590,38 @@ _box_profile() {
   echo "==> profile $name: $n var(s) passed" >&2
 }
 
+# podman only: box_runtime picks the OCI runtime for `run` (not for `build`,
+# whose RUN steps don't need a VM each). krun sizes its VM from
+# annotations rather than from --cpus/--memory, so pass those along too.
+_box_runtime_args() {
+  local rt mem
+  rt="$(box_runtime)"
+  [[ -n $rt ]] || return 0
+  [[ ${BOX_CTR[0]} == podman ]] || {
+    echo "==> ${BOX_ENV_PREFIX}_RUNTIME is podman-only; ignored here" >&2
+    return 0
+  }
+  BOX_RUN_ARGS+=(--runtime "$rt")
+  [[ $rt == krun ]] || return 0
+  mem="$(box_knob MEMORY 4G)"
+  case "$mem" in
+  *[gG] | *[gG][bB]) mem=$((${mem%%[gG]*} * 1024)) ;;
+  *[mM] | *[mM][bB]) mem=${mem%%[mM]*} ;;
+  *)
+    echo "error: ${BOX_ENV_PREFIX}_MEMORY=$mem: krun wants it in M or G" >&2
+    exit 1
+    ;;
+  esac
+  BOX_RUN_ARGS+=(--annotation "krun.cpus=$(box_knob CPUS 4)"
+    --annotation "krun.ram_mib=$mem")
+  # The ssh/docker bridges listen on host loopback. Map it in only when one is
+  # on: the guest then reaches every host 127.0.0.1 port, not just theirs.
+  if [[ -n "$(box_knob SSH)" || "$(box_knob DOCKER 0)" == 1 ]]; then
+    BOX_RUN_ARGS+=(--network "pasta:--map-host-loopback,$BOX_PASTA_LOOPBACK")
+  fi
+  echo "==> runtime: krun (${mem} MiB, $(box_knob CPUS 4) vCPUs)" >&2
+}
+
 # Fills BOX_RUN_ARGS with the flags every box passes: the project mounted at its
 # own Mac path (so bind-mount paths the agent hands to docker mean the same
 # thing to the Mac's daemon), BOX_HOME as the box's whole /root, VM sizing, the
@@ -544,6 +661,7 @@ box_run_args() {
     ${BOX_GH_ENV[@]+"${BOX_GH_ENV[@]}"}
     ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
+  _box_runtime_args
   if [[ -n "$(box_knob SSH)" ]]; then
     if [[ ${BOX_CTR[0]} == podman ]]; then
       # podman has no --ssh; mount the agent socket at a fixed path instead.
@@ -551,8 +669,17 @@ box_run_args() {
         echo "error: --ssh needs a running ssh-agent (SSH_AUTH_SOCK)" >&2
         exit 1
       }
-      BOX_RUN_ARGS+=(--volume "$SSH_AUTH_SOCK:/ssh-agent.sock"
-        --env SSH_AUTH_SOCK=/ssh-agent.sock)
+      if _box_is_krun; then
+        # Over host loopback instead; box-entry makes it a socket again in /tmp.
+        _box_bridge --ssh "$SSH_AUTH_SOCK"
+        BOX_ENTRY=1
+        BOX_RUN_ARGS+=(--env "BOX_SSH_AGENT_TCP=$(box_host_alias):$BOX_BRIDGE_PORT"
+          --env SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
+        echo "==> ssh: agent -> tcp://$(box_host_alias):$BOX_BRIDGE_PORT -> /tmp/ssh-agent.sock" >&2
+      else
+        BOX_RUN_ARGS+=(--volume "$SSH_AUTH_SOCK:/ssh-agent.sock"
+          --env SSH_AUTH_SOCK=/ssh-agent.sock)
+      fi
     else
       BOX_RUN_ARGS+=(--ssh)
     fi
@@ -567,16 +694,33 @@ box_run_args() {
 # poking at it by hand: the image's entrypoint is swapped out at the first
 # argument naming $BOX_IMAGE, and whatever follows goes to bash
 # (`claude-box --shell -c 'uname -a'`).
+#
+# With BOX_ENTRY=1 (set by box_run_args for --ssh under krun) the entrypoint,
+# the agent's or bash, is put behind the image's box-entry instead.
 box_run() {
-  [[ ${BOX_SHELL:-0} -eq 1 ]] || {
+  [[ ${BOX_SHELL:-0} -eq 1 || ${BOX_ENTRY:-0} -eq 1 ]] || {
     "${BOX_CTR[@]}" run "$@"
     return
   }
-  local args=()
+  local args=() ep=bash info
   while [[ $# -gt 0 && $1 != "$BOX_IMAGE" ]]; do
     args+=("$1")
     shift
   done
-  echo "==> --shell: bash instead of the agent" >&2
-  "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint bash "$@"
+  [[ ${BOX_SHELL:-0} -eq 1 ]] && echo "==> --shell: bash instead of the agent" >&2
+  if [[ ${BOX_ENTRY:-0} -eq 1 ]]; then
+    # podman-only, so the JSON form of --entrypoint is safe here
+    if [[ ${BOX_SHELL:-0} -eq 1 ]]; then
+      ep='["bash"]'
+    else
+      ep="$("${BOX_CTR[@]}" image inspect --format '{{json .Config.Entrypoint}}' "$BOX_IMAGE")"
+    fi
+    info="$("${BOX_CTR[@]}" image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE")"
+    [[ $info == 1 ]] || {
+      echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --rebuild" >&2
+      exit 1
+    }
+    ep='["/usr/local/bin/box-entry",'"${ep#[}"
+  fi
+  "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint "$ep" "$@"
 }
