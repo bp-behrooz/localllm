@@ -16,6 +16,7 @@
 #                              variables into the box (same as PI_BOX_PROFILE; or --profile NAME)
 #   pi-box --clean             drop the box's runtimes and caches, keep its config
 #   pi-box --clean-all         delete PI_BOX_HOME entirely (asks first)
+#   pi-box --shell [args]      bash in the box instead of the agent, for debugging
 #
 # PI_BOX_HOME is the box's entire /root, so anything the agent installs into the
 # home directory survives the container being thrown away: mise runtimes, gems,

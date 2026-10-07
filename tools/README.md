@@ -194,7 +194,7 @@ first-ever `container system dns` setup still prompts.
 ## Flags
 
 Shared by all of them: `--rebuild`, `--build-only`, `--ssh`, `--search`,
-`--profile NAME` (or `--profile=NAME`), `--clean`, `--clean-all`. The boxes that
+`--profile NAME` (or `--profile=NAME`), `--clean`, `--clean-all`, `--shell`. The boxes that
 use this repo's server (pi-box, opencode-box, ocr-box) add `--sync` and
 `--sync-only`, which re-read the served model list from the LLM server and
 rewrite the box's config —
@@ -206,6 +206,10 @@ reports). Everything else is passed through to the agent.
 `export SOME_VAR=SOME_VAL` lines — and passes every variable it defines into
 the box, so a per-project or per-task set of credentials and endpoints is one
 flag away without exporting anything in your own shell.
+
+`--shell` starts the same box (same mounts, env, runtime and other flags) with
+bash in place of the agent, for debugging the box itself. Any further args go
+to bash: `pi-box --shell -c 'uname -a'`.
 
 ## Resuming a session
 

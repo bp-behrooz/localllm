@@ -15,6 +15,7 @@
 #                                 variables into the box (same as CL_BOX_PROFILE; or --profile NAME)
 #   claude-box --clean             drop the box's runtimes and caches, keep its login
 #   claude-box --clean-all         delete CL_BOX_HOME entirely (asks first)
+#   claude-box --shell [args]      bash in the box instead of the agent, for debugging
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
 # or Linux with rootless podman (see tools/README.md), and agent-box-lib.bash

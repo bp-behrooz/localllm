@@ -15,6 +15,7 @@
 #                                into the box (same as AGY_BOX_PROFILE; or --profile NAME)
 #   agy-box --clean              drop the box's runtimes and caches, keep its login
 #   agy-box --clean-all          delete AGY_BOX_HOME entirely (asks first)
+#   agy-box --shell [args]       bash in the box instead of the agent, for debugging
 #
 # Requires: Apple Silicon, macOS 26, `container` CLI (brew install container),
 # or Linux with rootless podman (see tools/README.md), and agent-box-lib.bash
@@ -144,10 +145,10 @@ box_docker_bridge
 box_run_args
 
 # Default plugins. They live in the persisted home, so this runs once (and
-# again after --clean-all).
+# again after --clean-all). Skipped under --shell, which would hand bash the args.
 PLUGINS=(https://github.com/DietrichGebert/ponytail)
 for url in "${PLUGINS[@]}"; do
-  [[ -d "$AGY_BOX_HOME/.gemini/config/plugins/$(basename "$url")" ]] ||
+  [[ $BOX_SHELL -eq 1 || -d "$AGY_BOX_HOME/.gemini/config/plugins/$(basename "$url")" ]] ||
     box_run "${BOX_RUN_ARGS[@]}" "$BOX_IMAGE" plugin install "$url"
 done
 

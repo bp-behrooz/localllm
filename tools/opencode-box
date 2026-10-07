@@ -16,6 +16,7 @@
 #                                    variables into the box (same as OC_BOX_PROFILE; or --profile NAME)
 #   opencode-box --clean             drop the box's runtimes and caches, keep its config
 #   opencode-box --clean-all         delete OC_BOX_HOME entirely (asks first)
+#   opencode-box --shell [args]      bash in the box instead of the agent, for debugging
 #
 # OC_BOX_HOME is the box's entire /root, so anything the agent installs into the
 # home directory survives the container being thrown away: mise runtimes, gems,

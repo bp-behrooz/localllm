@@ -57,7 +57,7 @@ box_knob() {
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
 #   --rebuild, --build-only, --clean, --clean-all, --ssh, --search,
-#   --profile[=NAME]
+#   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
 #   box_parse_args "$@"
@@ -68,6 +68,7 @@ box_parse_args() {
   CLEAN=
   SYNC=0
   SYNC_ONLY=0
+  BOX_SHELL=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -102,6 +103,10 @@ box_parse_args() {
       }
       printf -v "${BOX_ENV_PREFIX}_PROFILE" '%s' "$2"
       shift 2
+      ;;
+    --shell)
+      BOX_SHELL=1
+      shift
       ;;
     --profile=*)
       printf -v "${BOX_ENV_PREFIX}_PROFILE" '%s' "${1#--profile=}"
@@ -548,6 +553,21 @@ box_run_args() {
 # Launch the image under whatever runtime the host has. Everything else about
 # the invocation is host-independent, so the *-box scripts call this instead of
 # naming the CLI.
+#
+# With --shell (BOX_SHELL=1) the same box starts bash instead of the agent, for
+# poking at it by hand: the image's entrypoint is swapped out at the first
+# argument naming $BOX_IMAGE, and whatever follows goes to bash
+# (`claude-box --shell -c 'uname -a'`).
 box_run() {
-  "${BOX_CTR[@]}" run "$@"
+  [[ ${BOX_SHELL:-0} -eq 1 ]] || {
+    "${BOX_CTR[@]}" run "$@"
+    return
+  }
+  local args=()
+  while [[ $# -gt 0 && $1 != "$BOX_IMAGE" ]]; do
+    args+=("$1")
+    shift
+  done
+  echo "==> --shell: bash instead of the agent" >&2
+  "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} --entrypoint bash "$@"
 }

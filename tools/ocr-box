@@ -15,6 +15,7 @@
 #                                variables into the box (same as OCR_BOX_PROFILE; or --profile NAME)
 #   ocr-box --clean              drop the box's runtimes and caches, keep its config
 #   ocr-box --clean-all          delete OCR_BOX_HOME entirely (asks first)
+#   ocr-box --shell [args]       bash in the box instead of the agent, for debugging
 #
 # Like pi-box and opencode-box it has --sync / --sync-only: on first launch
 # (or with --sync) it queries the server and writes the served models into the
