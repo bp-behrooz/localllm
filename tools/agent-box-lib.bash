@@ -214,8 +214,13 @@ FROM docker.io/library/ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Node 22 ships in 26.04's repos, so no NodeSource needed
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+# Ubuntu's mirrors over https: their port 80 has stopped answering. The base image
+# has no CA bundle yet, so this first run skips peer verification; apt checks
+# every package against the archive's GPG signatures, not TLS, so that is no
+# weaker than the http it replaces. Later apt runs verify, ca-certificates being in.
+RUN sed -i 's|http://|https://|' /etc/apt/sources.list.d/ubuntu.sources \
+ && apt-get -o Acquire::https::Verify-Peer=false update \
+ && apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends \
       build-essential ca-certificates curl git ripgrep fd-find jq openssh-client \
       python3 unzip less nodejs npm \
       docker.io docker-compose-v2 docker-buildx \
