@@ -5,6 +5,10 @@ can have every permission and the VM is the boundary. On a Mac that's Apple's
 `container`; on Linux (Arch), a rootless podman container booted as a krun
 microVM.
 
+Launched in a git worktree (`git worktree add ../agents/foo`) or submodule,
+the box also mounts the main repo's `.git` read-write, since that's where its
+objects and refs live.
+
 | script | agent |
 |---|---|
 | [`claude-box`](claude-box) | Claude Code (talks to Anthropic) |

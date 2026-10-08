@@ -881,6 +881,19 @@ _box_runtime_args() {
   echo "==> runtime: krun (${mem} MiB, $(box_knob CPUS 4) vCPUs)" >&2
 }
 
+# A linked worktree's (or submodule's) .git is a file pointing into the main
+# repo's .git, outside $PWD, so git in the box can't find its objects. Mount
+# that dir at its own path too. Read-write: commits, refs and the index live
+# there.
+_box_git_dir_volume() {
+  local common here
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  here="$(pwd -P)"
+  [[ $common == "$here" || $common == "$here"/* ]] && return 0
+  BOX_RUN_ARGS+=(--volume "$common:$common")
+  echo "==> git: $common (outside \$PWD)" >&2
+}
+
 # Fills BOX_RUN_ARGS with the flags every box passes: the project mounted at its
 # own Mac path (so bind-mount paths the agent hands to docker mean the same
 # thing to the Mac's daemon), BOX_HOME as the box's whole /root, VM sizing, the
@@ -920,6 +933,7 @@ box_run_args() {
     ${BOX_GH_ENV[@]+"${BOX_GH_ENV[@]}"}
     ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
+  _box_git_dir_volume
   _box_runtime_args
   _box_data_volumes
   if [[ -n "$(box_knob SSH)" ]]; then
