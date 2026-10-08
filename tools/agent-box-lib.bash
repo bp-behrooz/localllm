@@ -157,13 +157,49 @@ box_parse_args() {
 
 # --------------------------------------------------------------- runtime -----
 # podman's OCI runtime for `run`: krun (a microVM) unless ${BOX_ENV_PREFIX}_RUNTIME
-# names another, e.g. crun for a plain container. On a Mac only what was set.
+# names another, e.g. crun for a plain container. Under WSL2, crun: krun there
+# needs nested KVM, and Ubuntu doesn't package it. On a Mac only what was set.
 box_runtime() {
-  if [[ ${BOX_CTR[0]} == podman ]]; then
-    box_knob RUNTIME krun
-  else
+  if [[ ${BOX_CTR[0]} != podman ]]; then
     box_knob RUNTIME
+  elif _box_is_wsl; then
+    box_knob RUNTIME crun
+  else
+    box_knob RUNTIME krun
   fi
+}
+
+# WSL2's kernel names itself, e.g. 6.6.87.2-microsoft-standard-WSL2.
+_box_is_wsl() {
+  [[ ${BOX_CTR[0]} == podman && "$(uname -r)" == *[Mm]icrosoft* ]]
+}
+
+# WSL2 is a VM, but your distro lives in it too: an escape from crun lands
+# there, next to your files and, unless /etc/wsl.conf turns them off, the
+# Windows drives (/mnt/c) and Windows programs (interop). Say which are open.
+BOX_WSL_CONF=/etc/wsl.conf
+_box_wsl_note() {
+  _box_is_wsl && [[ "$(box_runtime)" != krun ]] || return 0
+  local open=()
+  [[ "$(_box_wsl_conf automount enabled)" == false ]] || open+=("Windows drives (/mnt/c)")
+  [[ "$(_box_wsl_conf interop enabled)" == false ]] || open+=("Windows programs (interop)")
+  [[ ${#open[@]} -gt 0 ]] || return 0
+  echo "==> WSL2: no VM of its own (crun); an escape lands in this distro, with" >&2
+  if [[ ${#open[@]} -eq 2 ]]; then
+    echo "    ${open[0]} and ${open[1]} reachable. See docs/WSL2.md" >&2
+  else
+    echo "    ${open[0]} reachable. See docs/WSL2.md" >&2
+  fi
+}
+
+# _box_wsl_conf SECTION KEY: the value in BOX_WSL_CONF, lowercased; empty if unset.
+_box_wsl_conf() {
+  [[ -r $BOX_WSL_CONF ]] || return 0
+  awk -v s="[$1]" -v k="$2=" '
+    { sub(/[#;].*/, ""); gsub(/[ \t\r]/, ""); $0 = tolower($0) }
+    /^\[/ { sec = ($0 == s); next }
+    sec && index($0, k) == 1 { v = substr($0, length(k) + 1) }
+    END { print v }' "$BOX_WSL_CONF"
 }
 
 box_require_runtime() {
@@ -185,6 +221,7 @@ box_require_runtime() {
       echo "error: podman is not rootless here; run the box as your own user (see tools/README.md)" >&2
       exit 1
     }
+    _box_wsl_note
     # krun boots each container as a libkrun microVM over KVM: the agent gets
     # its own kernel instead of sharing the host's, much like the Mac's VM.
     # It is the default, so say how to opt out rather than quietly drop the VM.

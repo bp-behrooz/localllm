@@ -3,7 +3,8 @@
 Five scripts that run a coding agent in a VM confined to `$PWD`, so the agent
 can have every permission and the VM is the boundary. On a Mac that's Apple's
 `container`; on Linux (Arch), a rootless podman container booted as a krun
-microVM.
+microVM; on Windows, WSL2 with rootless podman (see
+[docs/WSL2.md](../docs/WSL2.md)).
 
 Launched in a git worktree (`git worktree add ../agents/foo`) or submodule,
 the box also mounts the main repo's `.git` read-write, since that's where its
@@ -44,6 +45,9 @@ start otherwise. `*_BOX_RUNTIME=crun` runs a plain container instead of the VM.
 
 Files created in the box by a non-root uid land in your subuid range on the
 host. The agents run as root, so that's rare.
+
+**Windows:** WSL2, set up as in [docs/WSL2.md](../docs/WSL2.md), ideally a
+distro just for the boxes. They default to `crun` there, without krun's VM.
 
 ## Docker and ssh
 
@@ -127,7 +131,7 @@ does not (it writes to `/usr`).
 | `*_BOX_VERSION` | npm version of the agent (not agy-box; `--rebuild` updates it) |
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM size (default 4 / 4G; krun wants `M` or `G`) |
 | `*_BOX_SSH`, `*_BOX_DOCKER`, `*_BOX_SEARCH`, `*_BOX_PROFILE` | same as the flags |
-| `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`; `crun` for no VM) |
+| `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`, `crun` on WSL2; `crun` for no VM) |
 | `*_BOX_PROJECT` | name the project for persisted service data (default: git worktree or `$PWD`) |
 | `*_BOX_DOCKER_SOCK` | Docker socket (default: colima etc. on a Mac, your podman socket on Linux) |
 | `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | Mac: the host-loopback DNS name and IP |
@@ -241,3 +245,4 @@ alias pi=pi-box claude=claude-box opencode=opencode-box agy=agy-box
 ```
 
 (Pick other names if you also have the agents installed natively.)
+
