@@ -143,7 +143,7 @@ box_parse_args() {
 
   BOX_ARGS=("$@")
 
-  # These names become part of file paths (.env.NAME, ~/.box.NAME.dockerfile),
+  # These names become part of file paths (~/.box.NAME.env, ~/.box.NAME.dockerfile),
   # image tags and volume names, so keep them to a plain word.
   local knob val
   for knob in PROFILE PROJECT; do
@@ -327,7 +327,8 @@ EOF
 
 # Your own additions to the image, appended after the agent's tail:
 # ~/.box.default.dockerfile for every image, then ~/.box.<profile>.dockerfile
-# for the profile *_BOX_PROFILE names, as with .env.default and .env.<profile>.
+# for the profile *_BOX_PROFILE names, as with ~/.box.default.env and
+# ~/.box.<profile>.env.
 # The build context is empty, so RUN/ENV, not COPY.
 _box_profile_dockerfile() {
   local name
@@ -800,21 +801,38 @@ _box_gh_env() {
   fi
 }
 
-# _box_profile: read $BOX_HOME/.env.default if it exists, then the profile the
+# _box_profile: read ~/.box.default.env if it exists, then the profile the
 # script's flag set in *_BOX_PROFILE (which must exist) on top of it. Each is
 # shell lines, e.g. `export SOME_VAR=SOME_VAL`; every variable goes into the box
-# by name only, so the value stays out of the host's process list.
+# by name only, so the value stays out of the host's process list. They live
+# outside BOX_HOME, which the box mounts read-write as /root: there the agent
+# could read every profile and plant lines this host then evals.
+_box_profile_env() { printf '%s' "$HOME/.box.$1.env"; }
+
 _box_profile() {
   local name
   BOX_PROFILE_ENV=()
-  [[ -f "$BOX_HOME/.env.default" ]] && _box_profile_load default
+  _box_profile_legacy default
+  [[ -f "$(_box_profile_env default)" ]] && _box_profile_load default
   name="$(box_knob PROFILE "")"
   [[ -n $name && $name != default ]] || return 0
-  [[ -f "$BOX_HOME/.env.$name" ]] || {
-    echo "error: profile '$name' not found: $BOX_HOME/.env.$name" >&2
+  _box_profile_legacy "$name"
+  [[ -f "$(_box_profile_env "$name")" ]] || {
+    echo "error: profile '$name' not found: $(_box_profile_env "$name")" >&2
     exit 1
   }
   _box_profile_load "$name"
+}
+
+# Profiles used to sit in BOX_HOME. Refuse to run while one still does, so it
+# doesn't stay readable (and writable) from inside the box.
+_box_profile_legacy() {
+  local old="$BOX_HOME/.env.$1"
+  [[ -f $old ]] || return 0
+  echo "error: profiles moved out of the box home; run" >&2
+  echo "  mv '$old' '$(_box_profile_env "$1")'" >&2
+  echo "(or delete it, if that file already has its contents)" >&2
+  exit 1
 }
 
 _box_profile_load() {
@@ -827,7 +845,7 @@ _box_profile_load() {
     eval "export $line"
     BOX_PROFILE_ENV+=(--env "${BASH_REMATCH[1]}")
     n=$((n + 1))
-  done <"$BOX_HOME/.env.$name"
+  done <"$(_box_profile_env "$name")"
   echo "==> profile $name: $n var(s) passed" >&2
 }
 

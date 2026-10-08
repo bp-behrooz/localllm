@@ -13,7 +13,7 @@
 #                                    (same as OC_BOX_DOCKER=1)
 #   opencode-box --search [args...]  enable Tavily web search MCP tools
 #                                    (same as OC_BOX_SEARCH=1; needs TAVILY_API_KEY)
-#   opencode-box --profile=NAME      read $OC_BOX_HOME/.env.NAME (lines like
+#   opencode-box --profile=NAME      read ~/.box.NAME.env (lines like
 #                                    `export SOME_VAR=SOME_VAL`) and pass its
 #                                    variables into the box (same as OC_BOX_PROFILE; or --profile NAME)
 #   opencode-box --clean             drop the box's runtimes and caches, keep its config
@@ -54,7 +54,7 @@
 #   OC_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
 #   OC_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
-#   OC_BOX_PROFILE      name of a profile: $OC_BOX_HOME/.env.NAME is read and its
+#   OC_BOX_PROFILE      name of a profile: ~/.box.NAME.env is read and its
 #                       variables passed into the box (same as --profile NAME)
 #   OC_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
 #   OC_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
