@@ -8,12 +8,14 @@ left idle past its preset's TTL so the GPUs can drop into BACO. A
 single-GPU model can run as two load-balanced instances: both are started up
 front when the whole pool is free (and the model is already downloaded), and
 a busy model scales out onto a free or long-idle GPU on demand. Config comes
-from pool.json and env vars (see README), both provided by setup.sh.
+from pool.json and env vars (see README), both provided by setup.sh. API keys
+come from the keys file (`setup.sh key ...`), rechecked every 5 minutes.
 
 Self-test (no GPUs or config needed): python3 pool.py --test
 """
 import asyncio
 import glob
+import hashlib
 import json
 import os
 import re
@@ -33,7 +35,11 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_HUB = os.path.join(HERE, ".cache/huggingface/hub")
-GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD = [], {}, "", "", []
+# One key per line, "name sha256-of-key"; only hashes, so the file itself
+# grants nothing. Written by `setup.sh key add|rm`.
+KEYS_FILE = os.path.join(HERE, "keys")
+KEYS_RECHECK = 300  # seconds between looks at KEYS_FILE for added/revoked keys
+GPUS, PRESETS, LLAMA_BIN, PRELOAD = [], {}, "", []
 READY_TIMEOUT = 3600  # first start of a preset may have to download the model
 IDLE_SCALE_EVICT = 600  # only sacrifice a model idle this long to duplicate a busy one
 # Unload an instance idle this long (seconds; 0 = never) so its GPUs can power
@@ -59,7 +65,7 @@ instances = {}  # name -> [Instance]
 
 
 def load_config():
-    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, PRELOAD, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL
+    global GPUS, PRESETS, LLAMA_BIN, PRELOAD, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL, KEYS_RECHECK
     cfg = json.load(open(os.path.join(HERE, "pool.json")))
     GPUS, PRESETS, LLAMA_BIN = cfg["gpus"], cfg["presets"], cfg["llama_bin"]
     PRELOAD = cfg.get("preload", [])
@@ -67,7 +73,9 @@ def load_config():
     IDLE_TTL = int(os.environ.get("IDLE_TTL", cfg.get("idle_ttl", IDLE_TTL)))
     IDLE_TTL_CMD = int(os.environ.get("IDLE_TTL_CMD", cfg.get("idle_ttl_cmd", IDLE_TTL_CMD)))
     REAP_INTERVAL = int(os.environ.get("REAP_INTERVAL", REAP_INTERVAL))
-    MASTER_KEY = os.environ["MASTER_KEY"]
+    KEYS_RECHECK = int(os.environ.get("KEYS_RECHECK", KEYS_RECHECK))
+    if not api_keys():
+        sys.exit(f"no API keys in {KEYS_FILE}; add one with ./setup.sh key add NAME")
     _set_power_cap()
 
 
@@ -104,11 +112,57 @@ def idle_ttl(name):
     return IDLE_TTL_CMD if "cmd" in preset else IDLE_TTL
 
 
+def _sha256(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+_keys, _keys_stamp, _keys_checked = {}, None, None
+
+
+def api_keys():
+    """sha256 -> key name, from KEYS_FILE. At most every KEYS_RECHECK seconds
+    it looks again, and rereads the file if it changed: adding or revoking a
+    key needs no restart, and takes effect within that time."""
+    global _keys, _keys_stamp, _keys_checked
+    now = time.monotonic()
+    if _keys_checked is not None and now - _keys_checked < KEYS_RECHECK:
+        return _keys
+    _keys_checked = now
+    try:
+        st = os.stat(KEYS_FILE)
+        stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+    except FileNotFoundError:
+        stamp = None
+    if stamp != _keys_stamp:
+        keys = {}
+        if stamp:
+            with open(KEYS_FILE) as f:
+                lines = f.readlines()
+            for n, line in enumerate(lines, 1):
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[1]):
+                    print(f"[pool] {KEYS_FILE}:{n}: not 'name sha256', skipped", file=sys.stderr)
+                    continue
+                keys[parts[1]] = parts[0]
+        _keys, _keys_stamp = keys, stamp
+    return _keys
+
+
 def authorized(headers):
+    """The name of the key the request carries, or None."""
     # Bearer is the normal OpenAI form; x-litellm-api-key carries a bare key,
     # for clients that can only send the key in a header of their choosing.
-    return headers.get("authorization") == f"Bearer {MASTER_KEY}" \
-        or headers.get("x-litellm-api-key") == MASTER_KEY
+    keys = api_keys()
+    bearer = headers.get("authorization", "")
+    for key in (bearer[7:] if bearer.startswith("Bearer ") else None,
+                headers.get("x-litellm-api-key")):
+        name = keys.get(_sha256(key)) if key else None
+        if name:
+            return name
+    return None
 
 
 @app.middleware("http")
@@ -405,7 +459,7 @@ async def proxy(path: str, request: Request):
 
 
 def selftest():
-    global GPUS, PRESETS, LLAMA_BIN, MASTER_KEY, CACHE_HUB
+    global GPUS, PRESETS, LLAMA_BIN, CACHE_HUB, KEYS_FILE
     import shutil
     import tempfile
 
@@ -415,7 +469,9 @@ def selftest():
     # box can't collide with live llama-servers on 8080/8081
     GPUS = [70, 71]
     LLAMA_BIN = "/bin/true"
-    MASTER_KEY = "sk-test"
+    KEYS_FILE = os.path.join(work, "keys")
+    with open(KEYS_FILE, "w") as f:
+        f.write(f"test {_sha256('sk-test')}\n")
     PRESETS = {"a": {"hf": "org/a-GGUF:Q4", "gpus": 1, "args": "-c 4096"},
                "b": {"hf": "org/b-GGUF:Q4", "gpus": 1, "args": ""},
                "big": {"hf": "org/big-GGUF", "gpus": 2, "args": ""},
@@ -521,6 +577,7 @@ def selftest():
         assert r.status_code == 200, r.status_code  # bare key header works too
         assert not authorized({"x-litellm-api-key": "sk-wrong"})
         assert not authorized({"authorization": "sk-test"})  # bare key, wrong header
+        assert authorized({"authorization": "Bearer sk-test"}) == "test"
         r = await api.get("/v1/models")
         listed = [m["id"] for m in r.json()["data"]]
         assert set(listed) == set(PRESETS)
@@ -589,18 +646,58 @@ def selftest():
         assert instances["a"] == [loading]
         _drop(loading)
 
-        # 12. load_config: env > pool.json > default, and MASTER_KEY gets set
-        # (regression: a stranded line left MASTER_KEY unset -> 401 for all)
+        # 11b. keys file: several keys at once, each by name; adding or
+        #     revoking one takes effect without a restart
+        def recheck():  # as if KEYS_RECHECK had passed
+            global _keys_checked
+            _keys_checked = None
+        def write_keys(*lines):
+            with open(KEYS_FILE + ".new", "w") as f:
+                f.write("".join(l + "\n" for l in lines))
+            os.replace(KEYS_FILE + ".new", KEYS_FILE)  # as setup.sh writes it
+        write_keys("# who has what", "", f"alice {_sha256('sk-alice')}",
+                   f"bob {_sha256('sk-bob')}  # since May", "broken line", "carol nothex")
+        recheck()
+        assert authorized({"authorization": "Bearer sk-alice"}) == "alice"
+        assert authorized({"x-litellm-api-key": "sk-bob"}) == "bob"
+        assert not authorized({"authorization": "Bearer nothex"})
+        assert len(api_keys()) == 2  # the malformed lines skipped
+        write_keys(f"bob {_sha256('sk-bob')}", f"bob2 {_sha256('sk-bob2')}")
+        assert authorized({"authorization": "Bearer sk-alice"})  # not looked yet
+        recheck()
+        assert not authorized({"authorization": "Bearer sk-alice"})  # revoked
+        assert authorized({"authorization": "Bearer sk-bob2"}) == "bob2"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://t") as c:
+            r = await c.get("/v1/models", headers={"Authorization": "Bearer sk-bob2"})
+            assert r.status_code == 200, r.status_code
+            r = await c.get("/v1/models", headers={"Authorization": "Bearer sk-alice"})
+            assert r.status_code == 401, r.status_code
+        assert not authorized({"authorization": "Bearer sk-test"})  # not listed
+        assert not authorized({"authorization": "Bearer "})
+        os.remove(KEYS_FILE)
+        recheck()
+        assert api_keys() == {}
+
+        # 12. load_config: env > pool.json > default; without any key it
+        # refuses to start rather than answer every request with a 401
         cfg_path = os.path.join(HERE, "pool.json")
         with open(cfg_path, "w") as f:
             json.dump({"gpus": GPUS, "presets": PRESETS, "llama_bin": LLAMA_BIN,
                        "idle_ttl": 55, "idle_ttl_cmd": 66}, f)
-        os.environ["MASTER_KEY"] = "sk-cfg"
-        os.environ["REAP_INTERVAL"] = "7"
+        try:
+            load_config()
+            raise AssertionError("expected SystemExit without any key")
+        except SystemExit:
+            pass
+        write_keys(f"alice {_sha256('sk-alice')}")
+        recheck()
+        os.environ["REAP_INTERVAL"], os.environ["KEYS_RECHECK"] = "7", "8"
         load_config()
-        assert (MASTER_KEY, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL) == \
-            ("sk-cfg", 55, 66, 7), (MASTER_KEY, IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL)
+        assert (IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL, KEYS_RECHECK) == (55, 66, 7, 8), \
+            (IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL, KEYS_RECHECK)
         os.environ.pop("REAP_INTERVAL")
+        os.environ.pop("KEYS_RECHECK")
         os.remove(cfg_path)
 
         # 13. POWER_CAP_W: written to every card's power1_cap, in uW

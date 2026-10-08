@@ -34,14 +34,31 @@ HF_TOKEN=hf_xxx ./setup.sh    # token is stored in /opt/localllm/env; only neede
 ./setup.sh download           # pre-fetch all preset models (or name specific ones)
 ```
 
-The final output prints the API key (`MASTER_KEY`) clients must send as a
-Bearer token (`Authorization: Bearer sk-xxx`), or, for clients that can only
-send a bare key in a header of their choosing, as `x-litellm-api-key: sk-xxx`.
+The first run prints an API key, named after you (whoever ran `sudo`), that
+clients send as a Bearer token (`Authorization: Bearer sk-xxx`), or, for
+clients that can only send a bare key in a header of their choosing, as
+`x-litellm-api-key: sk-xxx`.
 `systemctl start|stop localllm` controls the whole stack. Optional env vars in
 `/opt/localllm/env`: `POWER_CAP_W` (per-GPU watts, one of the powerbench-tested
 300/270/240/210; written to the GPUs' `power1_cap` sysfs at startup — the
 unit needs write access to that file, i.e. root or a group-writable file),
 `IDLE_TTL` / `IDLE_TTL_CMD` / `REAP_INTERVAL` (seconds; override `pool.json`).
+
+### API keys
+
+Any number of keys can be active at once, one per person or client:
+
+```bash
+./setup.sh key add alice      # prints alice's key, once
+./setup.sh key list           # names only
+./setup.sh key rm alice       # revoked within 5 minutes
+```
+
+They live in `/opt/localllm/keys` as `name sha256` lines; only hashes, so a key
+can't be read back, only reissued. The pool checks the file every 5 minutes
+(`KEYS_RECHECK` in `/opt/localllm/env`, in seconds), so none of this needs a
+restart, and a change takes up to that long to apply. To rotate a key: add a
+new one, move the clients over, then remove the old one.
 
 ## Presets
 
@@ -126,8 +143,8 @@ example.com {
 }
 ```
 
-Clients then use base URL `https://example.com/localllm/v1` with the master
-key as API key.
+Clients then use base URL `https://example.com/localllm/v1` with their key as
+API key.
 
 ## The qwen3.8-radiance preset
 

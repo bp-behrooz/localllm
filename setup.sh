@@ -3,6 +3,8 @@
 #        ./setup.sh download [preset]…  pre-fetch models (all of them if none named;
 #                                       else the pool downloads on first request, slower)
 #        ./setup.sh remove <preset>     delete a preset's downloaded files
+#        ./setup.sh key add|rm <name>   issue (printed once) or revoke an API key
+#        ./setup.sh key list            name every key; changes apply within KEYS_RECHECK (5 min)
 # First run ever: HF_TOKEN=hf_xxx ./setup.sh   (token is stored, not needed again)
 # Requires pool/pool.py next to this script.
 set -euo pipefail
@@ -35,6 +37,8 @@ usage() {
   echo "usage: $0                     apply config (all presets served on demand)"
   echo "       $0 download [preset]…  pre-fetch model files (no preset: all of them)"
   echo "       $0 remove <preset>     delete a preset's downloaded files"
+  echo "       $0 key add|rm <name>   issue (printed once) or revoke an API key"
+  echo "       $0 key list            name every key"
   echo "presets: ${!PRESET[*]}"
   exit 1
 }
@@ -50,7 +54,61 @@ hf_fetch() { # <preset>
     /opt/localllm/venv/bin/hf download "$repo" "${inc[@]}"
 }
 
+# API keys: /opt/localllm/keys, "name sha256" per line. Only the hash is kept,
+# so a key is shown once, when issued. The pool checks the file every
+# KEYS_RECHECK seconds (default 300), so a change needs no restart.
+KEYS=/opt/localllm/keys
+
+keys_save() { # stdin -> $KEYS, in one rename so the pool never reads half of it
+  local tmp
+  tmp=$(mktemp /opt/localllm/.keys.XXXXXX)
+  cat >"$tmp"
+  chown localllm:localllm "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$KEYS"
+}
+
+key_recheck() { # how long the pool takes to see a change: KEYS_RECHECK, as words
+  local s
+  s=$(sed -n 's/^KEYS_RECHECK=//p' /opt/localllm/env 2>/dev/null | tail -1)
+  s=${s//[\"\']/}  # systemd allows the value quoted
+  s=${s:-300}
+  if [[ ! $s =~ ^[0-9]+$ ]]; then echo "KEYS_RECHECK=$s"
+  elif ((s % 60)); then echo "$s seconds"
+  elif ((s == 60)); then echo "a minute"
+  else echo "$((s / 60)) minutes"; fi
+}
+
+key_names() { awk '$1 !~ /^#/ && NF { print $1 }' "$KEYS" 2>/dev/null || true; }
+
+key_add() { # <name>: prints the new key
+  local key
+  key="sk-$(openssl rand -hex 16)"
+  { cat "$KEYS" 2>/dev/null || true
+    echo "$1 $(printf '%s' "$key" | sha256sum | cut -d' ' -f1)"; } | keys_save
+  echo "$key"
+}
+
 case "${1:-apply}" in
+key)
+  id localllm &>/dev/null || { echo "run $0 first: no localllm user yet"; exit 1; }
+  case "${2:-}:$#" in
+  add:3)
+    [[ $3 =~ ^[A-Za-z0-9_.@-]+$ ]] || { echo "key name: letters, digits, _ . @ -"; exit 1; }
+    key_names | grep -qxF "$3" && { echo "$3 already has a key; rm it first"; exit 1; }
+    echo "$3: $(key_add "$3")"
+    echo "(shown once: only its hash is stored; works within $(key_recheck))"
+    ;;
+  rm:3)
+    key_names | grep -qxF "$3" || { echo "no key named $3"; exit 1; }
+    awk -v n="$3" '$1 != n' "$KEYS" | keys_save
+    echo "revoked $3 (applies within $(key_recheck))"
+    ;;
+  list:2) key_names ;;
+  *) usage ;;
+  esac
+  exit 0
+  ;;
 apply) [[ $# -eq 0 ]] || usage ;;
 download)
   shift
@@ -126,8 +184,9 @@ printf '[containers]\ncgroups = "disabled"\n[engine]\nruntime = "crun"\n' \
 [[ -x /opt/localllm/venv/bin/hf ]] \
   || /opt/localllm/venv/bin/pip install -q 'huggingface_hub[hf_xet]'
 touch /opt/localllm/env
-grep -q '^MASTER_KEY=' /opt/localllm/env \
-  || echo "MASTER_KEY=sk-$(openssl rand -hex 16)" >>/opt/localllm/env
+# A fresh install's first key is named after whoever ran sudo.
+first_key= first_name="${SUDO_USER:-$USER}"
+[[ -n "$(key_names)" ]] || first_key=$(key_add "$first_name")
 grep -q '^HF_TOKEN=' /opt/localllm/env \
   || echo "HF_TOKEN=${HF_TOKEN:?no HF_TOKEN stored yet - run as HF_TOKEN=hf_xxx $0}" >>/opt/localllm/env
 chmod 600 /opt/localllm/env
@@ -191,5 +250,10 @@ systemctl enable --now localllm
 echo
 echo "Pool up. All presets are live model names on :4000; first request to a"
 echo "preset loads it (downloads it too, if you skipped '$0 download <preset>')."
-grep '^MASTER_KEY=' /opt/localllm/env
+if [[ -n $first_key ]]; then
+  echo "API key ($first_name, shown once): $first_key"
+else
+  echo "API keys ($0 key add|rm|list):"
+  key_names | sed 's/^/  /'
+fi
 echo "Loaded models: curl -s localhost:4000/health | python3 -m json.tool"
