@@ -907,7 +907,7 @@ box_run_args() {
 
   mkdir -p "$BOX_HOME"
   BOX_RUN_ARGS=(
-    -it --rm
+    -i --rm
     # trailing '-' so GNU tr doesn't read "_.-\n" as a (reversed) range
     --name "$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.\n-' '-')-$$"
     --volume "$PWD:$PWD"
@@ -921,6 +921,9 @@ box_run_args() {
     --env "MISE_TRUSTED_CONFIG_PATHS=$PWD"
     --env MISE_YES=1
   )
+  # A terminal only when there is one: `claude-box --shell -c ...` then also
+  # works from a pipe or CI, where -t is refused.
+  [[ -t 0 && -t 1 ]] && BOX_RUN_ARGS+=(-t)
   # The VM does not inherit the host terminal. Agents then think they are on a
   # dumb tty (Gemini warns "256-color support not detected"). Escape codes are
   # rendered by the host, so advertise a 256-color/truecolor terminal.
