@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stands in for Apple's container CLI, as stubs/podman does for podman.
+echo "container $*" >>"$FAKE_DIR/calls"
+case $1 in
+image)
+  [[ $2 == inspect ]] && echo '[{"config":{"labels":{"agent-box.entry":"5"}}}]'
+  ;;
+run)
+  shift
+  printf '%s\n' "$@" >"$FAKE_DIR/run.args"
+  ;;
+esac
+exit 0

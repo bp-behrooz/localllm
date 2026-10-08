@@ -246,3 +246,17 @@ alias pi=pi-box claude=claude-box opencode=opencode-box agy=agy-box
 
 (Pick other names if you also have the agents installed natively.)
 
+## Tests
+
+```sh
+mise install                                   # bats
+bats tools/tests/agent-box.bats                # seconds; stubbed runtimes
+BOX_IT=1 bats tools/tests/integration.bats     # Linux: builds and runs a real box
+```
+
+The stubbed tests pretend to be Linux, WSL2 or a Mac and check what each box
+would pass to `podman run` / `container run`. CI
+([`agent-box.yml`](../.github/workflows/agent-box.yml)) runs them on Linux and
+macOS, plus the integration tests under rootless podman with crun. A real Mac
+(Apple's `container`) or WSL2 box needs nested virtualization, which GitHub's
+runners lack, so check those by hand: `claude-box --shell -c 'git status'`.

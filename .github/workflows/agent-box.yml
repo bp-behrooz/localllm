@@ -1,0 +1,45 @@
+# The agent boxes (tools/): stubbed tests on Linux and macOS, and one real box
+# under rootless podman. Apple's container and WSL2 need a VM, which GitHub's
+# runners can't nest, so those stay manual.
+name: agent-box
+
+on:
+  push:
+    paths:
+      - "tools/**"
+      - ".github/workflows/agent-box.yml"
+      - "mise.toml"
+  # weekly, to catch what moves underneath: Ubuntu, npm, podman
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  stubs:
+    name: stubs (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: bats
+      - run: bats tools/tests/agent-box.bats
+        env:
+          # the scripts under macOS's own bash 3.2, as on a stock Mac
+          BOX_TEST_BASH: ${{ runner.os == 'macOS' && '/bin/bash' || 'bash' }}
+
+  podman:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: bats
+      - run: podman version
+      - run: bats tools/tests/integration.bats
+        env:
+          BOX_IT: 1

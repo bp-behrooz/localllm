@@ -1,0 +1,7 @@
+#!/bin/sh
+# The host the test pretends to be: FAKE_UNAME_S (-s) and FAKE_UNAME_R (-r).
+case $1 in
+-s) echo "$FAKE_UNAME_S" ;;
+-r) echo "$FAKE_UNAME_R" ;;
+*) exec /usr/bin/uname "$@" ;;
+esac

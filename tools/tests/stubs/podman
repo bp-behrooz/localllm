@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stands in for podman: answers what the boxes ask, and records `run`'s
+# arguments one per line in $FAKE_DIR/run.args.
+echo "podman $*" >>"$FAKE_DIR/calls"
+case $1 in
+info) echo "${FAKE_ROOTLESS:-true}" ;;
+image)
+  # the image exists; with --format, its agent-box.entry label
+  [[ $2 == inspect && $* == *--format* ]] && echo 5
+  ;;
+run)
+  shift
+  printf '%s\n' "$@" >"$FAKE_DIR/run.args"
+  ;;
+esac
+exit 0
