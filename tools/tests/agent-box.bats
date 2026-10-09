@@ -176,6 +176,7 @@ wsl_note() {
   run_has --volume "$HOME/.claude-box:/root"
   run_has --runtime crun
   run_has --entrypoint /usr/local/bin/box-entry
+  run_has --env ANTHROPIC_CUSTOM_HEADERS
   run_has claude-box bash
   run_has -c true
   run_lacks -t

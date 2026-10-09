@@ -42,6 +42,8 @@
 #   CL_BOX_HOME         host dir for the box's own Claude config/state (default ~/.claude-box)
 #   ANTHROPIC_API_KEY   passed into the container if set, never written to disk
 #   ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL  passed through if set
+#   ANTHROPIC_CUSTOM_HEADERS  passed through if set ("Name: value", one per line),
+#                       e.g. for a gateway at ANTHROPIC_BASE_URL that wants its own auth
 #   CL_BOX_YOLO         0 to keep Claude's own permission prompts (default 1:
 #                       permissions.defaultMode=bypassPermissions, the VM is the
 #                       boundary; the --dangerously-skip-permissions flag itself
@@ -171,6 +173,7 @@ box_run "${BOX_RUN_ARGS[@]}" \
   --env ANTHROPIC_API_KEY \
   --env ANTHROPIC_AUTH_TOKEN \
   --env ANTHROPIC_BASE_URL \
+  --env ANTHROPIC_CUSTOM_HEADERS \
   --env ANTHROPIC_MODEL \
   --env IS_SANDBOX=1 \
   "$BOX_IMAGE" "$@"
