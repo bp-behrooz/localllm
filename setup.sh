@@ -27,7 +27,7 @@ declare -A PRESET=(
   [gpt-oss-20b]="1|ggml-org/gpt-oss-20b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
   [muse-glimmer]="1|unsloth/Muse-Glimmer-30B-GGUF:UD-Q4_K_XL|-c 131072 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64"
   [gpt-oss-120b]="2|ggml-org/gpt-oss-120b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
-  [qwen3.8-radiance]="2|cmd|SERVED_NAMES=qwen3.8-radiance MAXLEN=262144 /opt/localllm/radiance/serve-mxfp4.sh"
+  [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh"
 )
 
 # preloaded by the pool at startup (space-separated preset names)
@@ -161,7 +161,7 @@ for f in subuid subgid; do # podman needs both; check each on its own
   usermod "--add-${f}s" "$sub-$((sub + 65535))" localllm
 done
 loginctl enable-linger localllm
-# docker resolves a short image name (radiance's stilldeadcode/vllm-radiance) to
+# docker resolves a short image name (radiance's stilldeadcode/radiance) to
 # Docker Hub; podman only does with a search registry set. Per-user drop-in, so
 # the host's own registries.conf stays as it is.
 mkdir -p /opt/localllm/.config/containers/registries.conf.d
@@ -214,6 +214,7 @@ chmod 600 /opt/localllm/env
   printf '\n  }\n}\n'
 } >/opt/localllm/pool.json
 install -m 644 "$(dirname "$0")/pool/pool.py" /opt/localllm/pool.py
+install -m 755 "$(dirname "$0")/pool/serve-radiance.sh" /opt/localllm/serve-radiance.sh
 
 # not podman's storage: its image layers are owned by localllm's subuids
 find /opt/localllm -path /opt/localllm/.local/share/containers -prune \

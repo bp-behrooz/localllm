@@ -148,35 +148,35 @@ API key.
 
 ## The qwen3.8-radiance preset
 
-The preloaded preset serves Qwen3.8-27B in native MXFP4 through
-[radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)
-(vLLM with RDNA4 kernels + speculative decoding; ~6× llama.cpp's dense-model
-speed on the same cards). It's a `cmd` preset, so the radiance checkout is a
-one-time manual install, as the `localllm` user, under its home. It runs on
-rootless podman: no daemon, no root-equivalent `docker` group, and the
-checkpoints and caches stay `localllm`-owned. `setup.sh` gives `localllm` a
+The preloaded preset serves Qwen3.8-27B in native MXFP4 (4-bit weights,
+E4M3 activations) with its DFlash2 drafter, through the
+[radiance](https://codeberg.org/StillDeadcode/radiance) engine — C++/HIP with
+RDNA4 kernels and speculative decoding. It's a `cmd` preset: `setup.sh`
+installs its launcher (`/opt/localllm/serve-radiance.sh`), and the image +
+model are a one-time manual install, as the `localllm` user, under its home.
+It runs on rootless podman: no daemon, no root-equivalent `docker` group, and
+the model and caches stay `localllm`-owned. `setup.sh` gives `localllm` a
 subuid range and a lingering user manager, so run it first:
 
 ```bash
 sudo pacman -S podman crun
 sudo ./setup.sh
-sudo git clone https://codeberg.org/ggz14/radiance-vllm-mxfp4 /opt/localllm/radiance
-sudo chown -R localllm:localllm /opt/localllm/radiance
-cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  ASSUME_YES=1 /opt/localllm/radiance/setup-mxfp4.sh
+  podman pull stilldeadcode/radiance
+sudo -u localllm mkdir -p /opt/localllm/models
+sudo -u localllm curl -LC - -o /opt/localllm/models/qwen3.8-27b-mxfp4.rad \
+  https://huggingface.co/StillDeadcode/qwen3.8-27b-mxfp4/resolve/main/qwen3.8-27b-mxfp4.rad
 sudo systemctl restart localllm
 ```
 
-`setup-mxfp4.sh` pulls the ~40 GiB image + checkpoints into `/opt/localllm`.
-Radiance picks podman over docker whenever both are installed. Coming from
+The image plus the 19 GiB model land in `/opt/localllm`. Coming from
 the old docker setup: after the steps above (which also drop `localllm` from
 the `docker` group and re-own the root-owned caches), free the old image with
 `sudo docker system prune -a`, and if nothing else on the box needs it,
 `sudo systemctl disable --now docker.socket docker.service` and
 `sudo pacman -Rns docker`. Cold start is
-slower than a llama-server preset — engine init plus, on the very first run,
-kernel compilation. Delete the preset from the table (and `PRELOAD`) if you
+slower than a llama-server preset — engine init plus loading the 19 GiB
+model. Delete the preset from the table (and `PRELOAD`) if you
 don't want any of this; nothing else depends on it.
 
 All logs, the pool's and every engine's, are in `journalctl -u localllm -f`.
