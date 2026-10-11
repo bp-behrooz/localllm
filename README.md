@@ -16,7 +16,7 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 | `setup.sh` | installs everything, generates all config; the preset table inside it is the single source of truth |
 | `pool/pool.py` | the server: key auth, GPU scheduling (spawn/evict `llama-server` instances), request proxying |
 | [`tools/`](tools/README.md) | the agent boxes: pi / OpenCode / Open Code Review against this server, plus Claude Code and Antigravity CLI (unrelated — they talk to Anthropic / Google as usual). Persistence, mise and customization documented there |
-| `pool/test.sh` | self-test: bootstraps a local `.venv` and runs `pool.py --test` (no GPUs needed) |
+| `pool/test.sh` | self-test: bootstraps a local `.venv`, runs `pool.py --test` and `setup-test.sh` (no GPUs needed) |
 
 ## Requirements
 
@@ -83,7 +83,8 @@ Two extras:
   command instead of `llama-server`. The pool executes it via `bash -c` with
   `PORT`, `GPUS` (HIP indices) and `NAME` (a unique instance name) in the
   environment; it must serve `/health` and OpenAI-style `/v1` on `PORT`, under
-  the preset's name. `download`/`remove` don't manage these. Advertise the
+  the preset's name. `download`/`remove` fetch and delete a radiance preset's
+  `.rad`. Advertise the
   context window with a `MAXLEN=<n>` in the command so `/model/info` picks it up.
 - **Preload**: preset names in `PRELOAD` (space-separated) are loaded when the
   pool starts, so the default model answers without a cold start. Preloaded
@@ -117,8 +118,8 @@ Inspect the pool: `curl -s localhost:4000/health | python3 -m json.tool`
 which models are loaded).
 
 Self-test (no GPUs needed): `./pool/test.sh` — bootstraps a local `.venv` with
-the dependencies (and, with mise, the python pinned in `mise.toml`) and runs
-`pool/pool.py --test`.
+the dependencies (and, with mise, the python pinned in `mise.toml`), runs
+`pool/pool.py --test` and `setup-test.sh` (the radiance preset detection).
 
 ## Remote access via Caddy
 
@@ -146,38 +147,48 @@ example.com {
 Clients then use base URL `https://example.com/localllm/v1` with their key as
 API key.
 
-## The qwen3.8-radiance preset
+## The radiance presets
 
-The preloaded preset serves Qwen3.8-27B in native MXFP4 (4-bit weights,
-E4M3 activations) with its DFlash2 drafter, through the
+Two presets run on the
 [radiance](https://codeberg.org/StillDeadcode/radiance) engine — C++/HIP with
-RDNA4 kernels and speculative decoding. It's a `cmd` preset: `setup.sh`
-installs its launcher (`/opt/localllm/serve-radiance.sh`), and the image +
-model are a one-time manual install, as the `localllm` user, under its home.
-It runs on rootless podman: no daemon, no root-equivalent `docker` group, and
-the model and caches stay `localllm`-owned. `setup.sh` gives `localllm` a
-subuid range and a lingering user manager, so run it first:
+RDNA4 kernels and speculative decoding — each across both GPUs:
+
+- `qwen3.8-flash-next` (preloaded): Qwen3.8-Flash-Next, an MoE with an int8
+  trunk and 4-bit experts, 200K context. The experts that don't fit VRAM
+  stream from a pinned host pool (12 GiB per GPU, so 24 GiB of RAM), and idle
+  sessions move to RAM and then to disk (up to 128 GiB under
+  `/opt/localllm/radiance-state`). Sized for 2× 32 GB cards, 96 GB of RAM and
+  ~300 GiB free on the `/opt` disk (114 GiB model + up to 128 GiB disk cache,
+  plus room for the rest).
+- `qwen3.8-radiance`: Qwen3.8-27B in native MXFP4 (4-bit weights, E4M3
+  activations) with its DFlash2 drafter, 256K context.
+
+They're `cmd` presets: `setup.sh` installs their launcher
+(`/opt/localllm/serve-radiance.sh <model.rad> [engine flags]`), and the image
+and models are a one-time manual install, as the `localllm` user, under its
+home. It runs on rootless podman: no daemon, no root-equivalent `docker`
+group, and the models and caches stay `localllm`-owned. `setup.sh` gives
+`localllm` a subuid range and a lingering user manager, so run it first:
 
 ```bash
 sudo pacman -S podman crun
 sudo ./setup.sh
+cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman pull stilldeadcode/radiance
-sudo -u localllm mkdir -p /opt/localllm/models
-sudo -u localllm curl -LC - -o /opt/localllm/models/qwen3.8-27b-mxfp4.rad \
-  https://huggingface.co/StillDeadcode/qwen3.8-27b-mxfp4/resolve/main/qwen3.8-27b-mxfp4.rad
+sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance   # 114 + 19 GiB
 sudo systemctl restart localllm
 ```
 
-The image plus the 19 GiB model land in `/opt/localllm`. Coming from
+Skip a model you don't want, and delete its preset from the table (and
+`PRELOAD`). Coming from
 the old docker setup: after the steps above (which also drop `localllm` from
 the `docker` group and re-own the root-owned caches), free the old image with
 `sudo docker system prune -a`, and if nothing else on the box needs it,
 `sudo systemctl disable --now docker.socket docker.service` and
 `sudo pacman -Rns docker`. Cold start is
-slower than a llama-server preset — engine init plus loading the 19 GiB
-model. Delete the preset from the table (and `PRELOAD`) if you
-don't want any of this; nothing else depends on it.
+slower than a llama-server preset — engine init plus loading the model,
+several minutes for Flash-Next.
 
 All logs, the pool's and every engine's, are in `journalctl -u localllm -f`.
 `setup.sh` sets `localllm`'s podman to the `passthrough` log driver, so a

@@ -17,7 +17,9 @@ GPUS=(0 1)
 #   free; 2 = spans both (pool evicts everything else first)
 # Custom engine form: "gpus|cmd|<command>". The pool runs the command via
 # bash -c with PORT, GPUS and NAME in the environment; it must serve /health
-# and /v1 on PORT. `download`/`remove` don't manage cmd presets.
+# and /v1 on PORT. A cmd running serve-radiance.sh is a radiance preset: its
+# .rad file is fetched by `download` from StillDeadcode/<name minus .rad> into
+# /opt/localllm/models and `remove` deletes it again.
 declare -A PRESET=(
   [thinkingcap]="1|bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF:Q4_K_M|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20"
   [qwen3.8]="1|unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
@@ -27,11 +29,12 @@ declare -A PRESET=(
   [gpt-oss-20b]="1|ggml-org/gpt-oss-20b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
   [muse-glimmer]="1|unsloth/Muse-Glimmer-30B-GGUF:UD-Q4_K_XL|-c 131072 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64"
   [gpt-oss-120b]="2|ggml-org/gpt-oss-120b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
-  [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh"
+  [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-mxfp4.rad --max-num-seqs 32 --kv-cache-dtype fp8"
+  [qwen3.8-flash-next]="2|cmd|MAXLEN=200000 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /data/kvcache/flashnext --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
 )
 
 # preloaded by the pool at startup (space-separated preset names)
-PRELOAD="qwen3.8-radiance"
+PRELOAD="qwen3.8-flash-next"
 
 usage() {
   echo "usage: $0                     apply config (all presets served on demand)"
@@ -43,7 +46,30 @@ usage() {
   exit 1
 }
 
+# Radiance presets are cmd presets running serve-radiance.sh with exactly one
+# .rad file, served from /opt/localllm/models; that file is the whole download
+# to fetch, and its name (minus .rad) is the StillDeadcode repo holding it.
+RAD=  # out: the .rad name, set by is_radiance
+is_radiance() { # <preset>: 0 = radiance (sets RAD), 1 = not one; dies on an ambiguous cmd
+  local m cmd
+  RAD=
+  IFS='|' read -r _ m cmd <<<"${PRESET[$1]}"
+  [[ "$m" == cmd && "$cmd" == *serve-radiance.sh* ]] || return 1
+  RAD=$(grep -oE '[^ /]+\.rad\b' <<<"$cmd" | sort -u || true)
+  [[ -n "$RAD" ]] || return 1
+  [[ "$RAD" != *$'\n'* ]] \
+    || { echo "$1: its cmd names more than one .rad; download/remove can't pick one" >&2
+         exit 1; }
+}
+
 hf_fetch() { # <preset>
+  if is_radiance "$1"; then
+    install -d -o localllm -g localllm /opt/localllm/models
+    sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
+      /opt/localllm/venv/bin/hf download "StillDeadcode/${RAD%.rad}" "$RAD" \
+      --local-dir /opt/localllm/models
+    return
+  fi
   IFS='|' read -r _ m _ <<<"${PRESET[$1]}"
   [[ "$m" == cmd ]] && { echo "skipping $1: custom engine manages its own files"; return 0; }
   local repo="${m%%:*}" tag="${m#*:}" inc=()
@@ -121,6 +147,18 @@ download)
 remove)
   [[ $# -eq 2 && -n "${PRESET[$2]:-}" ]] || usage
   IFS='|' read -r _ m _ <<<"${PRESET[$2]}"
+  if is_radiance "$2"; then
+    for p in "${!PRESET[@]}"; do # don't unlink a .rad another preset still names
+      if [[ "$p" != "$2" && ${PRESET[$p]} =~ (^|[[:space:]/])"$RAD"([[:space:]]|$) ]]; then
+        echo "$RAD is still used by $p; left it in place"; exit 1
+      fi
+    done
+    rm -f "/opt/localllm/models/$RAD"
+    echo "removed $2's /opt/localllm/models/$RAD"
+    echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed),"
+    echo "and its cache dir under /opt/localllm/radiance-state (see --prefix-cache-dir)"
+    exit 0
+  fi
   [[ "$m" == cmd ]] && { echo "$2 is a custom engine; remove its files where it keeps them"; exit 1; }
   repo="${m%%:*}" tag="${m#*:}"
   dir="/opt/localllm/.cache/huggingface/hub/models--${repo//\//--}"
