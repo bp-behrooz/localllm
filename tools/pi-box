@@ -42,7 +42,10 @@
 #                       e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
 #   PI_BOX_DEFAULT      default provider/model, e.g. "local/qwen3-coder" or
-#                       "opencode-go/minimax-m2.7" (default local/<first synced model>)
+#                       "opencode-go/minimax-m2.7". Without it, --sync points the
+#                       default at the first model the server reports (the pool
+#                       lists its preloaded presets first), overwriting a model
+#                       saved in the box with Ctrl+S.
 #   OPENCODE_API_KEY    passed through for OpenCode Go/Zen (built into pi)
 #   PI_BOX_SEARCH       1: enable Tavily web search / fetch tools (same as --search)
 #   TAVILY_API_KEY      passed through when search is enabled (@tavily/pi-extension)
@@ -108,7 +111,8 @@ EOF
 sync_models() {
   # Ask the local LLM server what it serves (GET <root>/model/info) and rewrite
   # the "local" provider's model list in models.json. Other providers and any
-  # hand-edited fields are kept. Seeds settings.json on first run.
+  # hand-edited fields are kept; settings.json is seeded on first run and its
+  # default model pointed at the first served model (see PI_BOX_DEFAULT).
   : "${LOCAL_LLM_URL:?set LOCAL_LLM_URL, e.g. https://llm.example.com/v1}"
   : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
   mkdir -p "$PI_AGENT_HOME/sessions"
@@ -139,6 +143,7 @@ for m in data:
     models.append(entry)
 if not models:
     sys.exit("error: the server reported no models")
+ids = [m["id"] for m in models]
 
 mpath = home / "models.json"
 cfg = json.loads(mpath.read_text()) if mpath.is_file() else {}
@@ -150,20 +155,29 @@ prov.setdefault("compat", {"supportsDeveloperRole": False,
                            "supportsReasoningEffort": False})
 prov["models"] = models
 mpath.write_text(json.dumps(cfg, indent=2) + "\n")
-print("==> synced %d local model(s): %s" % (len(models), ", ".join(m["id"] for m in models)),
-      file=sys.stderr)
+print("==> synced %d local model(s): %s" % (len(models), ", ".join(ids)), file=sys.stderr)
 
 spath = home / "settings.json"
 # Seed ponytail only on first run; if the user removes it from the settings,
 # we leave it out.
 settings = json.loads(spath.read_text()) if spath.is_file() else {
     "packages": ["git:github.com/DietrichGebert/ponytail"]}
-if "defaultProvider" not in settings:
-    default = os.environ.get("PI_BOX_DEFAULT") or "local/" + models[0]["id"]
-    provider, _, model = default.partition("/")
+# Default model: PI_BOX_DEFAULT, else the first model the server reports — the
+# pool lists its preloaded presets first, so that is the preset that answers
+# without a cold start. pi silently ignores a default it can't find in
+# models.json and starts another provider's model instead, so it has to follow
+# the server on every sync, not just the first one.
+forced = os.environ.get("PI_BOX_DEFAULT")
+if forced:
+    provider, _, model = forced.partition("/")
+    if provider == "local" and model not in ids:
+        sys.exit(f"error: PI_BOX_DEFAULT '{forced}' is not served; served: {', '.join(ids)}")
+else:
+    provider, model = "local", ids[0]
+if (settings.get("defaultProvider"), settings.get("defaultModel")) != (provider, model):
     settings["defaultProvider"] = provider
     settings["defaultModel"] = model
-    print("==> default model %s" % default, file=sys.stderr)
+    print("==> default model %s/%s" % (provider, model), file=sys.stderr)
 spath.write_text(json.dumps(settings, indent=2) + "\n")
 PYEOF
 }

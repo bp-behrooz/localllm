@@ -227,3 +227,70 @@ wsl_note() {
   run_box --shell -c true
   [[ $status -ne 0 && $output == *"not rootless"* ]]
 }
+
+# -------------------------------------------------------------- pi-box sync ----
+# --sync-only stops before the runtime, so a plain file answers the server:
+# sync_models fetches <root>/model/info, and urllib reads file:// URLs.
+pi_serve() {
+  local json m
+  for m in "$@"; do
+    json+="{\"model_name\":\"$m\",\"model_info\":{\"max_input_tokens\":32768}},"
+  done
+  mkdir -p "$BATS_TEST_TMPDIR/llm/model"
+  printf '{"data":[%s]}' "${json%,}" >"$BATS_TEST_TMPDIR/llm/model/info"
+}
+
+pi_sync() {
+  export PI_BOX_HOME="$BATS_TEST_TMPDIR/pi-home" \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
+  run bash "$TOOLS/pi-box" --sync-only
+}
+
+pi_default() {
+  python3 -c 'import json,os
+s = json.load(open(os.path.join(os.environ["PI_BOX_HOME"], ".pi/agent/settings.json")))
+print(s["defaultProvider"] + "/" + s["defaultModel"])'
+}
+
+# what Ctrl+S on a model in /model leaves behind
+pi_pick() {
+  PI_BOX_HOME="$PI_BOX_HOME" PICK="$1" python3 -c 'import json,os
+p = os.path.join(os.environ["PI_BOX_HOME"], ".pi/agent/settings.json")
+s = json.load(open(p))
+s["defaultProvider"], _, s["defaultModel"] = os.environ["PICK"].partition("/")
+json.dump(s, open(p, "w"))'
+}
+
+@test "pi sync: seeds the default model on a fresh home" {
+  pi_serve qwen3-coder llama-4-scout
+  pi_sync
+  [[ $status -eq 0 && $output == *"default model local/qwen3-coder"* ]]
+  [[ $(pi_default) == local/qwen3-coder ]]
+}
+
+@test "pi sync: moves a model saved in the box back onto the first served one" {
+  pi_serve qwen3-coder llama-4-scout
+  pi_sync
+  pi_pick local/llama-4-scout
+  pi_sync
+  [[ $output == *"default model local/qwen3-coder"* ]]
+  [[ $(pi_default) == local/qwen3-coder ]]
+}
+
+@test "pi sync: follows the server when a preset disappears" {
+  pi_serve qwen3-coder
+  pi_sync
+  pi_serve radiance-2
+  pi_sync
+  [[ $status -eq 0 && $output == *"default model local/radiance-2"* ]]
+  [[ $(pi_default) == local/radiance-2 ]]
+}
+
+@test "pi sync: PI_BOX_DEFAULT wins, and has to be served" {
+  pi_serve qwen3-coder
+  PI_BOX_DEFAULT=opencode-go/minimax-m2.7 pi_sync
+  [[ $status -eq 0 ]]
+  [[ $(pi_default) == opencode-go/minimax-m2.7 ]]
+  PI_BOX_DEFAULT=local/not-a-model pi_sync
+  [[ $status -ne 0 && $output == *"not served"* ]]
+}

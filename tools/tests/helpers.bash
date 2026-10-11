@@ -12,7 +12,7 @@ setup() {
   # Nothing from the host's own setup: no git identity, no box knobs.
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
   local v
-  for v in $(compgen -v | grep '^CL_BOX_'); do unset "$v"; done
+  for v in $(compgen -v | grep '_BOX_'); do unset "$v"; done
   unset SSH_AUTH_SOCK
   cd "$BATS_TEST_TMPDIR" || return
 }
