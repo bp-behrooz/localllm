@@ -28,7 +28,7 @@ exec podman run --replace --name "$NAME" \
   --init \
   -v "$MODEL_DIR":/models:ro \
   -v "$STATE_DIR":/data \
+  -e HIP_VISIBLE_DEVICES="$GPUS" \
   "$IMAGE" \
   --model "/models/$model" \
-  -e HIP_VISIBLE_DEVICES="$GPUS" \
   --host :: --port "$PORT" --tp "$tp" --max-model-len "$MAXLEN" "$@"

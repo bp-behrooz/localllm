@@ -154,7 +154,7 @@ Two presets run on the
 RDNA4 kernels and speculative decoding — each across both GPUs:
 
 - `qwen3.8-flash-next` (preloaded): Qwen3.8-Flash-Next, an MoE with an int8
-  trunk and 4-bit experts, 200K context. The experts that don't fit VRAM
+  trunk and 4-bit experts, 256K context. The experts that don't fit VRAM
   stream from a pinned host pool (12 GiB per GPU, so 24 GiB of RAM), and idle
   sessions move to RAM and then to disk (up to 128 GiB under
   `/opt/localllm/radiance-state`). Sized for 2× 32 GB cards, 96 GB of RAM and
