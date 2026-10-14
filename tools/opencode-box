@@ -23,6 +23,10 @@
 #   opencode-box --clean-data        delete this profile and project's service data (asks first)
 #   opencode-box --shell [args]      bash in the box instead of the agent, for debugging
 #
+# Each box runs `opencode --standalone`, i.e. a server of its own rather than
+# 2.0's one-background-service-per-home, so several boxes can run at once. That
+# server is only reachable inside the VM, so opencode's --server is refused.
+#
 # OC_BOX_HOME is the box's entire /root, so anything the agent installs into the
 # home directory survives the container being thrown away: mise runtimes, gems,
 # ~/.npm, ~/.cargo, shell history. `mise use ruby@4.0.2 && bundle install` is a
@@ -224,6 +228,18 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
+# Not a flag the box can honour: the agent's server listens on the box's own
+# loopback, unreachable from outside the VM. Whole arguments only, so a prompt
+# that mentions --server survives. Checked before anything is built or cleaned.
+for a in "$@"; do
+  case $a in
+  --server | --server=*)
+    echo "error: --server is not supported in a box; the box runs the server" >&2
+    exit 1
+    ;;
+  esac
+done
+
 box_clean_or_exit
 
 if [[ $SYNC_ONLY -eq 1 ]]; then
@@ -255,6 +271,19 @@ if [[ -n "$(box_knob SEARCH)" ]]; then
     exit 1
   }
   BOX_SEARCH_ENV=(--env TAVILY_API_KEY)
+fi
+
+# 2.0's background service is one per $HOME and registers itself in the home the
+# boxes share, so two boxes overwrite each other's registration and both TUIs
+# loop on "Your session will resume automatically". --standalone gives each box a
+# server of its own; nothing outside a container could reach a shared one anyway.
+# Only the TUI takes that flag (`opencode session list` rejects it), so it goes
+# in for a launch that isn't a subcommand: no arguments, flags, or a path. A bare
+# word counts as a subcommand, which is today's behaviour, not a failure.
+if [[ ${BOX_SHELL:-0} -eq 0 ]]; then
+  case ${1:-} in
+  '' | -* | .* | */*) set -- --standalone "$@" ;;
+  esac
 fi
 
 box_run "${BOX_RUN_ARGS[@]}" \

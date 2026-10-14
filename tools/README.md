@@ -239,6 +239,17 @@ echo "$USER ALL=(root) NOPASSWD: /sbin/pfctl -a com.apple/container -f /etc/pf.a
 sudo visudo -c -f /etc/sudoers.d/container-pfctl   # if it errors, rm the file
 ```
 
+## Two boxes at once
+
+`opencode-box` launches its agent with `--standalone`: a server of its own
+rather than OpenCode 2.0's background service, which is one per `$HOME` and
+registers itself in the home the boxes share. Two TUIs on a plain host attach to
+that one service; two containers can't (each has its own loopback and its own
+PIDs), so each box gets its own server and they run side by side, sharing the
+home's config, models and sessions. `--shell` and subcommands like
+`opencode-box session list` are passed through untouched; `--server` is refused,
+since that server lives behind the VM's loopback.
+
 ## Resuming a session
 
 Agents print resume hints like `pi --session <id>` or `claude --resume <id>`.

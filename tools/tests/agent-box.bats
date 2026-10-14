@@ -374,6 +374,41 @@ assert "model" not in cfg, "a pin here would outrank the recent models"'
   [[ $(oc_start) == localllm/qwen3-coder ]]
 }
 
+# -------------------------------------------- opencode-box private server ----
+# 2.0's background service registers itself in the shared home, once per user,
+# so two boxes on one home would overwrite each other's registration and both
+# TUIs loop on "Your session will resume automatically". The box runs each
+# agent with its own server instead.
+@test "opencode: the agent gets a private server, so boxes don't fight" {
+  llm_serve qwen3-coder
+  oc_run
+  [[ $status -eq 0 ]]
+  run_has --standalone
+  run_has opencode-box --standalone
+  oc_run --continue
+  run_has --standalone
+  oc_run .
+  run_has --standalone
+}
+
+@test "opencode: bash and a subcommand keep their command" {
+  llm_serve qwen3-coder
+  oc_run --shell -c true
+  run_lacks --standalone
+  oc_run session list
+  run_lacks --standalone
+}
+
+@test "opencode: --server is refused; a prompt that mentions it is not" {
+  llm_serve qwen3-coder
+  oc_run --server http://127.0.0.1:4000
+  [[ $status -ne 0 && $output == *"--server is not supported"* ]]
+  call_lacks "podman run"
+  oc_run run "add --server support"
+  [[ $status -eq 0 ]]
+  run_lacks --server
+}
+
 # -------------------------------------------- opencode-box web search --------
 # A full launch against the stubs: ensure_settings writes the config, box_run
 # records what the box would be started with.
