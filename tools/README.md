@@ -223,7 +223,9 @@ server. Everything else goes to the agent.
   `pi-box --shell -c 'uname -a'`.
 - `--clean` drops runtimes and caches but keeps the login; `--clean-all`
   deletes the whole home (asks first); `--clean-data` deletes this profile and
-  project's service data (asks first).
+  project's service data (asks first). Do a `--clean-all` before an agent's own
+  major version bump (OpenCode 1.x → 2.0 changed the plugin and config formats)
+  and let the next launch seed a fresh config.
 
 ## Mac: the once-per-boot sudo
 

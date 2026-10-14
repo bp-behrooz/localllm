@@ -231,7 +231,8 @@ wsl_note() {
 # -------------------------------------------------------------- pi-box sync ----
 # --sync-only stops before the runtime, so a plain file answers the server:
 # sync_models fetches <root>/model/info, and urllib reads file:// URLs.
-pi_serve() {
+# Shared by every box that syncs models.
+llm_serve() {
   local json m
   for m in "$@"; do
     json+="{\"model_name\":\"$m\",\"model_info\":{\"max_input_tokens\":32768}},"
@@ -262,14 +263,14 @@ json.dump(s, open(p, "w"))'
 }
 
 @test "pi sync: seeds the default model on a fresh home" {
-  pi_serve qwen3-coder llama-4-scout
+  llm_serve qwen3-coder llama-4-scout
   pi_sync
   [[ $status -eq 0 && $output == *"default model local/qwen3-coder"* ]]
   [[ $(pi_default) == local/qwen3-coder ]]
 }
 
 @test "pi sync: moves a model saved in the box back onto the first served one" {
-  pi_serve qwen3-coder llama-4-scout
+  llm_serve qwen3-coder llama-4-scout
   pi_sync
   pi_pick local/llama-4-scout
   pi_sync
@@ -278,19 +279,119 @@ json.dump(s, open(p, "w"))'
 }
 
 @test "pi sync: follows the server when a preset disappears" {
-  pi_serve qwen3-coder
+  llm_serve qwen3-coder
   pi_sync
-  pi_serve radiance-2
+  llm_serve radiance-2
   pi_sync
   [[ $status -eq 0 && $output == *"default model local/radiance-2"* ]]
   [[ $(pi_default) == local/radiance-2 ]]
 }
 
 @test "pi sync: PI_BOX_DEFAULT wins, and has to be served" {
-  pi_serve qwen3-coder
+  llm_serve qwen3-coder
   PI_BOX_DEFAULT=opencode-go/minimax-m2.7 pi_sync
   [[ $status -eq 0 ]]
   [[ $(pi_default) == opencode-go/minimax-m2.7 ]]
   PI_BOX_DEFAULT=local/not-a-model pi_sync
   [[ $status -ne 0 && $output == *"not served"* ]]
+}
+
+# --------------------------------------------- opencode-box sync -------------
+# Same file-backed server; the box keeps its own config and its recent-model
+# state under OC_BOX_HOME, which is the container's whole /root.
+oc_sync() {
+  export OC_BOX_HOME="$BATS_TEST_TMPDIR/oc-home" \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
+  run bash "$TOOLS/opencode-box" --sync-only
+}
+
+# what opencode starts on: the first entry of its recent models
+oc_start() {
+  python3 -c 'import json,os
+s = json.load(open(os.path.join(os.environ["OC_BOX_HOME"], ".local/state/opencode/model.json")))
+print(s["recent"][0]["providerID"] + "/" + s["recent"][0]["modelID"])'
+}
+
+# what /model leaves behind when you pick another one
+oc_pick() {
+  OC_BOX_HOME="$OC_BOX_HOME" PICK="$1" python3 -c 'import json,os
+p = os.path.join(os.environ["OC_BOX_HOME"], ".local/state/opencode/model.json")
+s = json.load(open(p))
+pid, _, mid = os.environ["PICK"].partition("/")
+s["recent"][0] = {"providerID": pid, "modelID": mid}
+json.dump(s, open(p, "w"))'
+}
+
+@test "opencode sync: seeds the provider and starts on the first served model" {
+  llm_serve qwen3-coder llama-4-scout
+  oc_sync
+  [[ $status -eq 0 && $output == *"synced 2 local model(s)"* ]]
+  [[ $(oc_start) == localllm/qwen3-coder ]]
+  python3 -c 'import json,os
+cfg = json.load(open(os.path.join(os.environ["OC_BOX_HOME"], ".config/opencode/opencode.json")))
+p = cfg["provider"]["localllm"]
+assert p["options"]["baseURL"] == os.environ["LOCAL_LLM_URL"], p["options"]
+assert p["options"]["apiKey"] == "{env:LOCAL_LLM_API_KEY}", p["options"]
+assert set(p["models"]) == {"qwen3-coder", "llama-4-scout"}, p["models"]
+assert "model" not in cfg, "a pin here would outrank the recent models"'
+}
+
+@test "opencode sync: OC_BOX_DEFAULT picks where the box starts" {
+  llm_serve qwen3-coder llama-4-scout
+  OC_BOX_DEFAULT=localllm/llama-4-scout oc_sync
+  [[ $status -eq 0 && $output == *"current model localllm/llama-4-scout"* ]]
+  [[ $(oc_start) == localllm/llama-4-scout ]]
+}
+
+@test "opencode sync: a model picked in the box lasts until the next sync" {
+  llm_serve qwen3-coder llama-4-scout
+  oc_sync
+  oc_pick localllm/llama-4-scout
+  oc_sync
+  [[ $(oc_start) == localllm/qwen3-coder ]]
+}
+
+# -------------------------------------------- opencode-box web search --------
+# A full launch against the stubs: ensure_settings writes the config, box_run
+# records what the box would be started with.
+oc_run() {
+  export OC_BOX_HOME="$BATS_TEST_TMPDIR/oc-home" OC_BOX_RUNTIME=crun \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
+  run bash "$TOOLS/opencode-box" "$@"
+}
+
+# what the config pins web search to: {"provider":...} or false
+oc_websearch() {
+  python3 -c 'import json,os
+print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
+  ".config/opencode/opencode.json"))).get("websearch")))'
+}
+
+@test "opencode search: --search names the provider, so 2.0 never asks" {
+  llm_serve qwen3-coder
+  TAVILY_API_KEY=tv oc_run --search --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $(oc_websearch) == '{"provider": "tavily"}' ]]
+  run_has --env TAVILY_API_KEY
+}
+
+@test "opencode search: a provider named once is undone by the next launch without it" {
+  llm_serve qwen3-coder
+  TAVILY_API_KEY=tv oc_run --search --shell -c true
+  [[ $(oc_websearch) == '{"provider": "tavily"}' ]]
+  oc_run --shell -c true
+  [[ $(oc_websearch) == false ]]
+}
+
+@test "opencode search: without --search the tool is off, not offered" {
+  llm_serve qwen3-coder
+  TAVILY_API_KEY=tv oc_run --shell -c true
+  [[ $status -eq 0 && $(oc_websearch) == false ]]
+  run_lacks TAVILY_API_KEY
+}
+
+@test "opencode search: --search without a key is refused before anything runs" {
+  llm_serve qwen3-coder
+  TAVILY_API_KEY= oc_run --search --shell -c true
+  [[ $status -ne 0 && $output == *"needs TAVILY_API_KEY"* ]]
 }

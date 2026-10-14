@@ -11,7 +11,9 @@
 #                                    host's gh token along (same as OC_BOX_SSH=1)
 #   opencode-box --docker [args...]  let the agent use the host's Docker / podman
 #                                    (same as OC_BOX_DOCKER=1)
-#   opencode-box --search [args...]  enable Tavily web search MCP tools
+#   opencode-box --search [args...]  enable web search (OpenCode's built-in
+#                                    websearch tool, Tavily provider; without it
+#                                    the tool is disabled, so 2.0 never asks)
 #                                    (same as OC_BOX_SEARCH=1; needs TAVILY_API_KEY)
 #   opencode-box --profile=NAME      read ~/.box.NAME.env (lines like
 #                                    `export SOME_VAR=SOME_VAL`) and pass its
@@ -36,7 +38,7 @@
 # sitting next to this script.
 #
 # Env knobs:
-#   OC_BOX_VERSION      npm version/tag of opencode-ai (default "latest")
+#   OC_BOX_VERSION      npm version/tag of @opencode/cli (default "latest")
 #   OC_BOX_HOME         host dir for the box's own config/state (default ~/.opencode-box)
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
@@ -46,8 +48,9 @@
 #                       model>, i.e. the server's preloaded one); switching models in
 #                       opencode sticks until the next sync
 #   OPENCODE_API_KEY    passed through for OpenCode Go (built in)
-#   OC_BOX_SEARCH       1 to enable Tavily web search MCP tools (same as --search)
-#   TAVILY_API_KEY      passed through when search is enabled (tavily-mcp)
+#   OC_BOX_SEARCH       1 to enable web search (same as --search)
+#   TAVILY_API_KEY      passed through when search is enabled; OpenCode 2.0
+#                       reads it as the provider for its built-in websearch tool
 #   OC_BOX_HIDE         comma-separated provider ids to disable
 #                       (default "opencode", i.e. OpenCode Zen; "" disables nothing)
 #   OC_BOX_DOCKER       1 to expose the Mac's Docker daemon to the box (see notes)
@@ -96,7 +99,9 @@ set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
 # ------------------------------------------------------------- helpers ------
 box_dockerfile_agent() {
   cat <<EOF
-RUN npm install -g opencode-ai@${OC_VERSION} \\
+# 2.x is published as @opencode/cli; the old opencode-ai package is stuck at
+# 1.19.0 (its "latest" dist-tag never moved to 2.0), so @latest there is 1.x.
+RUN npm install -g @opencode/cli@${OC_VERSION} \\
  && npm cache clean --force
 
 # No XDG overrides needed: /root as a whole is the persisted mount, so the
@@ -161,11 +166,9 @@ opts["baseURL"] = base
 opts.setdefault("apiKey", "{env:LOCAL_LLM_API_KEY}")   # resolved by opencode at runtime
 prov["models"] = models
 
-# A "model" in the config outranks the recent models, so it would undo every
-# switch made inside opencode on the next launch. Start there via the recent
-# list instead; earlier versions of this script wrote the pin, so drop it.
-if cfg.pop("model", None):
-    print("==> removed the config's pinned model", file=sys.stderr)
+# No "model" pin on purpose: it outranks the recent models, so it would undo
+# every switch made inside opencode. The recent list below is how a box starts;
+# a config that carries a stale pin is why an agent's major bump wants --clean-all.
 cpath.write_text(json.dumps(cfg, indent=2) + "\n")
 
 default = os.environ.get("OC_BOX_DEFAULT") or f"{provider}/{next(iter(models))}"
@@ -186,8 +189,9 @@ PYEOF
 }
 
 ensure_settings() {
-  # Every launch: full permissions (the VM is the boundary), the provider
-  # blocklist from OC_BOX_HIDE, and the Tavily MCP server when --search is enabled.
+  # Every launch: full permissions (the VM is the boundary) and the provider
+  # blocklist from OC_BOX_HIDE. Web search needs no config at all — 2.0 reads
+  # TAVILY_API_KEY itself, which --search passes in.
   mkdir -p "$(dirname "$(config_path)")"
   OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" \
     OC_BOX_SEARCH="$(box_knob SEARCH)" python3 - <<'PYEOF'
@@ -205,22 +209,14 @@ if hide:
 else:
     cfg.pop("disabled_providers", None)
 
-search_enabled = bool(os.environ.get("OC_BOX_SEARCH"))
-mcp = cfg.setdefault("mcp", {})
-if search_enabled:
-    mcp["tavily"] = {
-        "type": "local",
-        "command": ["npx", "-y", "tavily-mcp"],
-        "environment": {
-            "TAVILY_API_KEY": "{env:TAVILY_API_KEY}"
-        },
-        "enabled": True
-    }
+# 2.0 stops the first search to ask which provider to search with. The box
+# decides that up front: --search passes TAVILY_API_KEY, so it names Tavily;
+# without it the box has no search credential, so the tool is turned off rather
+# than offering a prompt it could not honour.
+if os.environ.get("OC_BOX_SEARCH"):
+    cfg["websearch"] = {"provider": "tavily"}
 else:
-    mcp.pop("tavily", None)
-
-if not mcp:
-    cfg.pop("mcp", None)
+    cfg["websearch"] = False
 
 if json.dumps(cfg, sort_keys=True) != before:
     cpath.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -239,7 +235,7 @@ if [[ $SYNC_ONLY -eq 1 ]]; then
 fi
 
 box_require_runtime
-box_ensure_image "$REBUILD" "$BUILD_ONLY" "opencode-ai@$OC_VERSION"
+box_ensure_image "$REBUILD" "$BUILD_ONLY" "@opencode/cli@$OC_VERSION"
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
