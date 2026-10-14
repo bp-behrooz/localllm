@@ -93,7 +93,22 @@ box_dockerfile_agent() {
 # Native binary, not npm. --dir keeps it out of the persisted home so --clean
 # cannot delete the agent. With no D-Bus in the VM, agy stores its token in a
 # file under ~/.gemini, and with no browser it shows the paste-a-code login.
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin
+#
+# Not a curl|bash pipe: it once delivered a compressed body (nothing asked for
+# one) to bash, and the build failed as "syntax error near unexpected token
+# `)'" on a line of binary. Ask for a readable body, undo gzip that arrives
+# unannounced, and name the payload if it is still not a script.
+RUN set -eu; \
+    curl -fsSL --compressed https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh; \
+    if gzip -t /tmp/agy-install.sh 2>/dev/null; then \
+      gunzip -c /tmp/agy-install.sh > /tmp/agy-install.sh.unz; \
+      mv /tmp/agy-install.sh.unz /tmp/agy-install.sh; \
+    fi; \
+    grep -q '^#!/' /tmp/agy-install.sh || { \
+      echo 'ERROR: agy install.sh is not a shell script, got:' >&2; \
+      head -c 300 /tmp/agy-install.sh >&2; exit 1; }; \
+    bash /tmp/agy-install.sh --dir /usr/local/bin; \
+    rm /tmp/agy-install.sh
 
 # The binary lives in the image. A background self-update would rewrite it and
 # be thrown away with the container.
