@@ -59,7 +59,9 @@ box_knob() {
 # Parses common flags shared by all boxes:
 #   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --docker, --search,
 #   --profile[=NAME], --shell
-# plus (--sync, --sync-only) when BOX_CAN_SYNC=1.
+# plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
+# the whole command; with --rebuild or --build-only it runs first and the build
+# follows (see box_clean_or_exit).
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
 #   box_parse_args "$@"
 #   set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
@@ -502,7 +504,7 @@ box_clean() {
     read -r reply </dev/tty || reply=""
     [[ $reply == [yY]* ]] || {
       echo "==> cancelled" >&2
-      return 0
+      return 1
     }
     rm -rf "${home:?}"
     echo "==> removed $home" >&2
@@ -523,6 +525,17 @@ box_clean() {
   echo "==> cleaned $home, now $(du -sh "$home" 2>/dev/null | cut -f1); kept ${BOX_KEEP[*]}" >&2
 }
 
+# box_clean_or_exit: what main does with the --clean flags. Alone, a clean is
+# the whole command and nothing else runs. With --rebuild or --build-only the
+# clean goes first and the build follows, so taking an agent's new major version
+# is one command: `opencode-box --clean-all --rebuild`. --sync-only keeps its
+# old meaning (clean, then stop) and a cancelled clean stops everything.
+box_clean_or_exit() {
+  [[ -n ${CLEAN-} ]] || return 0
+  box_clean "$CLEAN" || exit 0
+  [[ ${SYNC_ONLY:-0} -eq 0 && ( ${REBUILD:-0} -eq 1 || ${BUILD_ONLY:-0} -eq 1 ) ]] || exit 0
+}
+
 # box_clean data: delete this profile and project's service volumes, after asking.
 _box_clean_data() {
   local prefix vols=() v reply
@@ -539,7 +552,7 @@ _box_clean_data() {
   read -r reply </dev/tty || reply=""
   [[ $reply == [yY]* ]] || {
     echo "==> cancelled" >&2
-    return 0
+    return 1
   }
   "${BOX_CTR[@]}" volume rm "${vols[@]}" >/dev/null
   echo "==> removed ${#vols[@]} volume(s)" >&2

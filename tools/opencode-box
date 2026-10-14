@@ -3,7 +3,7 @@
 # $PWD, with all permissions granted (the container is the sandbox).
 #
 #   opencode-box [opencode args...]  run (builds the image / syncs models on first use)
-#   opencode-box --rebuild [args...] delete existing image, rebuild, then run
+#   opencode-box --rebuild [args...] delete existing image, rebuild, then run (--clean* runs first)
 #   opencode-box --build-only        (re)build the image and exit
 #   opencode-box --sync [args...]    refresh the local model list, then run
 #   opencode-box --sync-only         refresh the local model list and exit
@@ -224,10 +224,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
-if [[ -n $CLEAN ]]; then
-  box_clean "$CLEAN"
-  exit 0
-fi
+box_clean_or_exit
 
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_models

@@ -228,6 +228,29 @@ wsl_note() {
   [[ $status -ne 0 && $output == *"not rootless"* ]]
 }
 
+# ------------------------------------------------------------------ clean ----
+# --clean-all and --clean-data ask on the tty, so these use --clean: same code
+# path, no answer needed.
+@test "clean: a bare clean stops there" {
+  export CL_BOX_RUNTIME=crun
+  mkdir -p "$HOME/.claude-box/runtimes"
+  touch "$HOME/.claude-box/runtimes/node"
+  run_box --clean
+  [[ $status -eq 0 && ! -e "$HOME/.claude-box/runtimes" ]]
+  call_lacks "podman build"
+}
+
+@test "clean: --rebuild --clean cleans, then rebuilds and runs" {
+  export CL_BOX_RUNTIME=crun
+  mkdir -p "$HOME/.claude-box/runtimes"
+  touch "$HOME/.claude-box/runtimes/node"
+  run_box --rebuild --clean
+  [[ $status -eq 0 && ! -e "$HOME/.claude-box/runtimes" ]]
+  call_has "podman image rm"
+  call_has "podman build"
+  call_has "podman run"
+}
+
 # -------------------------------------------------------------- pi-box sync ----
 # --sync-only stops before the runtime, so a plain file answers the server:
 # sync_models fetches <root>/model/info, and urllib reads file:// URLs.

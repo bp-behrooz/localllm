@@ -54,6 +54,11 @@ run_lacks() {
   ! grep -qxF -- "$1" "$FAKE_DIR/run.args"
 }
 
+# call_has TEXT / call_lacks TEXT: did the stubbed runtime see this command at
+# all? Matched as a substring, because build arguments carry a temp dir.
+call_has() { grep -qF -- "$1" "$FAKE_DIR/calls"; }
+call_lacks() { ! grep -qF -- "$1" "$FAKE_DIR/calls"; }
+
 git_q() { git -c user.name=t -c user.email=t@example.com "$@" -q; }
 
 # A repo at $1 with one commit.

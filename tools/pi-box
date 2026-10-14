@@ -3,7 +3,7 @@
 # confined to $PWD.
 #
 #   pi-box [pi args...]        run pi (builds the image / syncs models on first use)
-#   pi-box --rebuild [args...] delete existing pi-box image(s), rebuild, then run
+#   pi-box --rebuild [args...] delete existing pi-box image(s), rebuild, then run (--clean* runs first)
 #   pi-box --build-only        (re)build the image and exit
 #   pi-box --sync [args...]    refresh the local model list from the server, then run
 #   pi-box --sync-only         refresh the local model list and exit
@@ -223,10 +223,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
-if [[ -n $CLEAN ]]; then
-  box_clean "$CLEAN"
-  exit 0
-fi
+box_clean_or_exit
 
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_models

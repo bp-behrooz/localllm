@@ -6,7 +6,7 @@
 # is only here for the sandboxing.
 #
 #   claude-box [claude args...]  run (builds the image on first use)
-#   claude-box --rebuild [args...] delete existing image, rebuild, then run
+#   claude-box --rebuild [args...] delete existing image, rebuild, then run (--clean* runs first)
 #   claude-box --build-only        (re)build the image and exit
 #   claude-box --ssh [args...]     forward your ssh-agent into the box, and pass the
 #                                 host's gh token along (same as CL_BOX_SSH=1)
@@ -149,10 +149,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
-if [[ -n $CLEAN ]]; then
-  box_clean "$CLEAN"
-  exit 0
-fi
+box_clean_or_exit
 
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "@anthropic-ai/claude-code@$CL_VERSION"

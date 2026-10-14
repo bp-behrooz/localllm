@@ -4,7 +4,7 @@
 #
 #   ocr-box [ocr args...]        run (builds the image on first use), e.g.
 #                                ocr-box review / ocr-box scan / ocr-box session list
-#   ocr-box --rebuild [args...]  delete existing image, rebuild, then run
+#   ocr-box --rebuild [args...]  delete existing image, rebuild, then run (--clean* runs first)
 #   ocr-box --build-only         (re)build the image and exit
 #   ocr-box --sync [args...]    refresh the local model list from the server, then run
 #   ocr-box --sync-only         refresh the local model list and exit
@@ -186,10 +186,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
-if [[ -n $CLEAN ]]; then
-  box_clean "$CLEAN"
-  exit 0
-fi
+box_clean_or_exit
 
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_config

@@ -7,7 +7,7 @@
 # unrelated to this repo's server. https://antigravity.google/docs/cli/overview
 #
 #   agy-box [agy args...]        run (builds the image on first use)
-#   agy-box --rebuild [args...]  delete existing image, rebuild, then run
+#   agy-box --rebuild [args...]  delete existing image, rebuild, then run (--clean* runs first)
 #   agy-box --build-only         (re)build the image and exit
 #   agy-box --ssh [args...]      forward your ssh-agent into the box, and pass the
 #                                host's gh token along (same as AGY_BOX_SSH=1)
@@ -131,10 +131,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------- main ------
-if [[ -n $CLEAN ]]; then
-  box_clean "$CLEAN"
-  exit 0
-fi
+box_clean_or_exit
 
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "agy"
