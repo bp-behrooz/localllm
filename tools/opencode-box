@@ -286,8 +286,16 @@ if [[ ${BOX_SHELL:-0} -eq 0 ]]; then
   esac
 fi
 
+# Each VM has its own guest kernel, so two boxes don't share physical pages for
+# an mmap'd opencode.db-shm across virtiofs and corrupt a shared WAL database.
+# Scope OPENCODE_DB per profile and worktree/project, and lock it to one box.
+oc_db="$(_box_data_prefix)"
+oc_db="${oc_db%-}.db"
+[[ ${BOX_SHELL:-0} -eq 1 ]] || _box_data_lock "opencode-${oc_db%.db}"
+
 box_run "${BOX_RUN_ARGS[@]}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
+  --env "OPENCODE_DB=$oc_db" \
   ${BOX_SEARCH_ENV[@]+"${BOX_SEARCH_ENV[@]}"} \
   "$BOX_IMAGE" "$@"

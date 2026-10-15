@@ -380,15 +380,34 @@ assert "model" not in cfg, "a pin here would outrank the recent models"'
 # TUIs loop on "Your session will resume automatically". The box runs each
 # agent with its own server instead.
 @test "opencode: the agent gets a private server, so boxes don't fight" {
+  make_repo main
+  git_q -C main worktree add -b foo ../agents/foo
   llm_serve qwen3-coder
+  cd main
   oc_run
   [[ $status -eq 0 ]]
   run_has --standalone
   run_has opencode-box --standalone
+  local main_db
+  main_db="$(grep '^OPENCODE_DB=' "$FAKE_DIR/run.args")"
+  [[ $main_db == OPENCODE_DB=agentbox-default-main-*.db ]]
+  cd ../agents/foo
   oc_run --continue
   run_has --standalone
+  local foo_db
+  foo_db="$(grep '^OPENCODE_DB=' "$FAKE_DIR/run.args")"
+  [[ $foo_db == OPENCODE_DB=agentbox-default-foo-*.db && $foo_db != "$main_db" ]]
   oc_run .
   run_has --standalone
+  # A second opencode-box in the same worktree is refused while the lock is held.
+  local lock="$XDG_RUNTIME_DIR/agentbox-locks/opencode-${foo_db#OPENCODE_DB=}"
+  lock="${lock%.db}"
+  mkdir -p "$lock" && echo $$ >"$lock/pid"
+  oc_run
+  [[ $status -ne 0 && $output == *"another box (pid $$)"* ]]
+  # --shell still gets in for debugging.
+  oc_run --shell -c true
+  [[ $status -eq 0 ]]
 }
 
 @test "opencode: bash and a subcommand keep their command" {
