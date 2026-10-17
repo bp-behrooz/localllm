@@ -8,6 +8,7 @@
 #   wt merge [--rebase|--squash] [branch] merge branch into main worktree, then wt rm it
 #   wt ocr [--pr <num> | branch] [args]  run ocr-box review in the worktree against main branch
 #   wt path [-m | branch]                print worktree path (-m or no arg for main worktree)
+#   wt cd [-m | branch]                  same as path; `cd "$(wt cd x)"` in bash
 #   wt init [fish]                       print fish shell wrapper (auto-cd on add/rm/merge/ocr/cd)
 #
 # Env knobs:
@@ -28,7 +29,7 @@ function wt --wraps="git worktree"
             set -l dir (command wt $argv); or return
             test -d "$dir"; and cd "$dir"
         case cd
-            set -l dir (command wt path $argv[2..]); or return
+            set -l dir (command wt cd $argv[2..]); or return
             test -d "$dir"; and cd "$dir"
         case rm remove merge
             set -l main (command wt path -m 2>/dev/null)
@@ -49,10 +50,29 @@ function wt --wraps="git worktree"
     end
 end
 complete -c wt -f
-complete -c wt -n "not __fish_seen_subcommand_from add rm remove merge ocr cd path ls list init" \
-    -a "add rm merge ocr cd path ls"
-complete -c wt -n "__fish_seen_subcommand_from rm remove merge ocr cd path" \
-    -a "(git worktree list --porcelain 2>/dev/null | string replace -r -f '^branch refs/heads/' '')"
+function __wt_sub
+    set -l skip -h --help
+    for w in (commandline -opc)[2..]
+        if not contains -- $w $skip; and string match -qr '^[a-z]' -- $w
+            echo $w; return
+        end
+    end
+end
+function __wt_branches
+    git worktree list --porcelain 2>/dev/null | string replace -r -f '^branch refs/heads/' ''
+end
+complete -c wt -n "test -z (__wt_sub)" -a "add rm remove merge ocr cd path ls list init"
+complete -c wt -n "__fish_seen_subcommand_from init" -a fish
+complete -c wt -n "__fish_seen_subcommand_from add" -s w -l with-changes -d 'move uncommitted changes'
+complete -c wt -n "__fish_seen_subcommand_from add" -l pr -d 'fetch GitHub PR'
+complete -c wt -n "__fish_seen_subcommand_from rm remove" -s f -l force -d 'force remove'
+complete -c wt -n "__fish_seen_subcommand_from merge" -l rebase -s r -d 'rebase then ff'
+complete -c wt -n "__fish_seen_subcommand_from merge" -l squash -s s -d 'squash merge'
+complete -c wt -n "__fish_seen_subcommand_from path cd" -s m -l main -d 'main worktree'
+complete -c wt -n "__fish_seen_subcommand_from rm remove merge ocr path cd" -a "(__wt_branches)"
+complete -c wt -n "__fish_seen_subcommand_from add" -a "(__wt_branches)"
+complete -c wt -n "__fish_seen_subcommand_from ocr" -l pr -d 'review a PR'
+complete -c wt -n "__fish_seen_subcommand_from ocr" -l profile -r -d 'ocr-box profile'
 FISH
   exit 0
   ;;
@@ -367,7 +387,7 @@ ocr)
   (cd "$dir" && "$tools_dir/ocr-box" ${box_args[@]+"${box_args[@]}"})
   ;;
 
-path)
+path | cd)
   if [[ $# -eq 0 || "${1:-}" == "-m" || "${1:-}" == "--main" ]]; then
     printf '%s\n' "$main_root"
   else
