@@ -562,7 +562,7 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   load_lib
   BOX_ENV_PREFIX=CL_BOX; CL_BOX_GH=1
   git init -q -b main "$BATS_TEST_TMPDIR/repo"; cd "$BATS_TEST_TMPDIR/repo"
-  git commit -q --allow-empty -m init
+  git_q commit --allow-empty -m init
   git worktree add -q "$BATS_TEST_TMPDIR/wt" -b feat
   _box_gh_keychain_get() { [[ $1 == "$BATS_TEST_TMPDIR/repo" ]] && echo tok-repo; }
   cd "$BATS_TEST_TMPDIR/wt"; _box_gh_env
