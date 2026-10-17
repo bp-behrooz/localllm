@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# box-gh-token: store, show or remove the GitHub token the boxes pass to the
+# agent with --gh. Keyed by the repo, so it works from any worktree of it.
+#
+#   box-gh-token set      store a token (hidden prompt on a TTY, else read stdin)
+#   box-gh-token remove   delete the repo's token
+#   box-gh-token show     report whether a token is set (never prints it)
+#
+# Stored in the host keychain (macOS: `security`; Linux: `secret-tool`), keyed by
+# the main worktree's path. It is never written into the repo or ~/.box.*.
+set -euo pipefail
+
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+  { echo "error: run this inside a git repository" >&2; exit 1; }
+key=$(dirname "$common")
+
+case $(uname -s) in
+  Darwin)
+    get() { security find-generic-password -s box-gh -a "$key" -w 2>/dev/null; }
+    put() { security add-generic-password -U -s box-gh -a "$key" -w "$1"; }
+    del() { security delete-generic-password -s box-gh -a "$key" >/dev/null 2>&1; }
+    ;;
+  *)
+    get() { secret-tool lookup service box-gh account "$key" 2>/dev/null; }
+    put() { printf '%s' "$1" | secret-tool store --label="box-gh $key" service box-gh account "$key"; }
+    del() { secret-tool clear service box-gh account "$key"; }
+    ;;
+esac
+
+case ${1-} in
+  set)
+    if [[ -t 0 ]]; then
+      read -rsp "GitHub token for $key: " tok
+      echo
+    else
+      read -r tok
+    fi
+    [[ -n $tok ]] || { echo "error: empty token" >&2; exit 1; }
+    put "$tok"
+    echo "stored token for $key"
+    ;;
+  remove)
+    del && echo "removed token for $key" || echo "no token for $key"
+    ;;
+  show)
+    if get >/dev/null; then echo "token set for $key"; else echo "no token for $key"; fi
+    ;;
+  *)
+    echo "usage: box-gh-token set|remove|show" >&2
+    exit 2
+    ;;
+esac

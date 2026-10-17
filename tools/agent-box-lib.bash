@@ -57,7 +57,7 @@ box_knob() {
 
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
-#   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --docker, --search,
+#   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh, --docker, --search,
 #   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
 # the whole command; with --rebuild or --build-only it runs first and the build
@@ -97,6 +97,10 @@ box_parse_args() {
       ;;
     --ssh)
       printf -v "${BOX_ENV_PREFIX}_SSH" '%s' 1
+      shift
+      ;;
+    --gh)
+      printf -v "${BOX_ENV_PREFIX}_GH" '%s' 1
       shift
       ;;
     --docker)
@@ -836,18 +840,31 @@ _box_git_env() {
   fi
 }
 
+# Repo GitHub tokens live in the host keychain, keyed by the main worktree's
+# path (`box-gh-token set`). Nothing is written into the repo or ~/.box.*.
+_box_gh_keychain_get() {
+  case $(uname -s) in
+    Darwin) security find-generic-password -s box-gh -a "$1" -w 2>/dev/null ;;
+    *)      secret-tool lookup service box-gh account "$1" 2>/dev/null ;;
+  esac
+}
+
 _box_gh_env() {
-  # The agent socket authenticates git over ssh, but GitHub's API only takes a
-  # token, so `gh pr view`/`gh api` stay locked out. Hand the box the host's gh
-  # token alongside the agent. Exported rather than passed by value: `--env NAME`
-  # inherits it, keeping the token out of the host's process list.
+  # --gh: hand the box the repo's GitHub token. Keyed by the main worktree, so
+  # every worktree of the repo shares it. Exported rather than passed by value:
+  # `--env NAME` inherits it, keeping the token out of the host's process list.
   BOX_GH_ENV=()
-  [[ -n "$(box_knob SSH)" ]] || return 0
-  if GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n $GH_TOKEN ]]; then
+  [[ "$(box_knob GH)" == 1 ]] || return 0
+  local common key
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common="$(pwd -P)/.git"
+  key="$(dirname "$common")"
+  if GH_TOKEN=$(_box_gh_keychain_get "$key") && [[ -n $GH_TOKEN ]]; then
     export GH_TOKEN
     BOX_GH_ENV=(--env GH_TOKEN)
+    echo "==> gh: token for $key" >&2
   else
-    echo "==> --ssh: no gh token on the host (run \`gh auth login\`); gh stays logged out in the box" >&2
+    echo "error: --gh: no token for $key (run \`box-gh-token set\` in the main checkout)" >&2
+    exit 1
   fi
 }
 

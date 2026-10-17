@@ -550,3 +550,30 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
 }
 
 
+@test "gh: no --gh means no token is passed, even if one is stored" {
+  load_lib
+  BOX_ENV_PREFIX=CL_BOX
+  git init -q "$BATS_TEST_TMPDIR/repo"; cd "$BATS_TEST_TMPDIR/repo"
+  _box_gh_keychain_get() { echo tok; }
+  _box_gh_env
+  [[ ${#BOX_GH_ENV[@]} -eq 0 && -z ${GH_TOKEN-} ]]
+}
+@test "gh: --gh uses the main checkout's key from a worktree" {
+  load_lib
+  BOX_ENV_PREFIX=CL_BOX; CL_BOX_GH=1
+  git init -q -b main "$BATS_TEST_TMPDIR/repo"; cd "$BATS_TEST_TMPDIR/repo"
+  git commit -q --allow-empty -m init
+  git worktree add -q "$BATS_TEST_TMPDIR/wt" -b feat
+  _box_gh_keychain_get() { [[ $1 == "$BATS_TEST_TMPDIR/repo" ]] && echo tok-repo; }
+  cd "$BATS_TEST_TMPDIR/wt"; _box_gh_env
+  [[ $GH_TOKEN == tok-repo && " ${BOX_GH_ENV[*]} " == *" --env GH_TOKEN "* ]]
+}
+@test "gh: --gh without a stored token is refused" {
+  load_lib
+  BOX_ENV_PREFIX=CL_BOX; CL_BOX_GH=1
+  git init -q "$BATS_TEST_TMPDIR/repo"; cd "$BATS_TEST_TMPDIR/repo"
+  _box_gh_keychain_get() { return 1; }
+  run _box_gh_env
+  [[ $status -eq 1 ]]
+  [[ $output == *"box-gh-token set"* ]]
+}
