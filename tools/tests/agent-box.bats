@@ -472,3 +472,81 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   TAVILY_API_KEY= oc_run --search --shell -c true
   [[ $status -ne 0 && $output == *"needs TAVILY_API_KEY"* ]]
 }
+
+# -------------------------------------------------------------------- wt -----
+@test "wt: add, merge and rm under <parent>/<WT_DIR>/<project>/<slug>" {
+  make_repo myproj
+  echo "SECRET=1" >myproj/.env
+  cd myproj
+  local dir
+  dir="$("${BOX_TEST_BASH:-bash}" "$TOOLS/wt" add feat/one)"
+  [[ $dir == "$BATS_TEST_TMPDIR/worktrees/myproj/feat-one" ]]
+  [[ -f "$dir/.env" && ! -L "$dir/.env" ]]
+  # Running from inside the linked worktree resolves main_root and merges/removes cleanly.
+  cd "$dir"
+  [[ "$("${BOX_TEST_BASH:-bash}" "$TOOLS/wt" path -m)" == "$BATS_TEST_TMPDIR/myproj" ]]
+  git_q commit --allow-empty -m "feat commit"
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com \
+    GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
+    "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" merge --rebase
+  cd "$BATS_TEST_TMPDIR/myproj"
+  [[ ! -d "$dir" && ! -d "$BATS_TEST_TMPDIR/worktrees/myproj" ]]
+  [[ "$(git log -1 --format=%s)" == "feat commit" ]]
+  # WT_DIR overrides the sibling folder (e.g. agents).
+  dir="$(WT_DIR=agents "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" add fix-two)"
+  [[ $dir == "$BATS_TEST_TMPDIR/agents/myproj/fix-two" ]]
+  WT_DIR=agents "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" rm fix-two
+  [[ ! -d "$dir" ]]
+}
+
+@test "wt: -w moves uncommitted changes, ls shows status, rm prunes box data" {
+  make_repo myproj
+  cd myproj
+  echo "wip" >untracked.txt
+  local dir proj lock db
+  dir="$("${BOX_TEST_BASH:-bash}" "$TOOLS/wt" add -w wip-branch)"
+  [[ ! -e "$BATS_TEST_TMPDIR/myproj/untracked.txt" && -f "$dir/untracked.txt" ]]
+  proj="$(basename "$dir")-$(printf '%s' "$dir" | cksum | cut -d' ' -f1)"
+  lock="$XDG_RUNTIME_DIR/agentbox-locks/opencode-agentbox-default-$proj"
+  db="$HOME/.opencode-box/.local/share/opencode/agentbox-default-$proj.db"
+  mkdir -p "$lock" "$(dirname "$db")"
+  echo $$ >"$lock/pid"
+  touch "$db"
+  local ls_out
+  ls_out="$("${BOX_TEST_BASH:-bash}" "$TOOLS/wt" ls)"
+  [[ $ls_out == *"(dirty,running)"* ]]
+  "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" rm -f wip-branch
+  [[ ! -d "$dir" && ! -e "$db" && ! -d "$lock" ]]
+}
+
+@test "wt: ocr --pr fetches PR into worktree and runs ocr-box review against main" {
+  make_repo origin_repo
+  git clone -q "$BATS_TEST_TMPDIR/origin_repo" myproj
+  # Simulate refs/pull/42/head on origin
+  git_q -C origin_repo checkout -b pr-src
+  echo "change" >origin_repo/file.txt
+  git -C origin_repo add file.txt
+  git_q -C origin_repo commit -m "pr change"
+  git -C origin_repo update-ref refs/pull/42/head HEAD
+
+  llm_serve qwen3-coder
+  export OCR_BOX_HOME="$BATS_TEST_TMPDIR/ocr-home" OCR_BOX_RUNTIME=crun \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
+  cd myproj
+  local mb cd_file="$BATS_TEST_TMPDIR/cd_target"
+  mb="$(git branch --show-current)"
+  WT_CD_FILE="$cd_file" run "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" ocr --pr 42
+  [[ $status -eq 0 ]]
+  local pr_dir="$BATS_TEST_TMPDIR/worktrees/myproj/pr-42"
+  [[ -f "$pr_dir/file.txt" && "$(cat "$cd_file")" == "$pr_dir" ]]
+  run_has --workdir "$pr_dir"
+  run_has review --from
+  run_has --from "$mb"
+  run_has --to HEAD
+  # wt init works outside a git repo (e.g. from config.fish at shell startup)
+  cd "$BATS_TEST_TMPDIR"
+  run "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" init fish
+  [[ $status -eq 0 && $output == *"function wt"* ]]
+}
+
+

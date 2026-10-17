@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# wt: manage git worktrees under <project_root>/../${WT_DIR:-worktrees}/<project>/<name>.
+#
+#   wt [ls]                              list worktrees with dirty / ahead-behind / box status
+#   wt add [-w] <branch> [base]          create worktree (-w moves uncommitted changes into it)
+#   wt add --pr <num|url> [branch]       fetch GitHub PR into a worktree (default branch: pr-<num>)
+#   wt rm [-f] [branch]                  remove worktree, branch, and its per-worktree box data
+#   wt merge [--rebase|--squash] [branch] merge branch into main worktree, then wt rm it
+#   wt ocr [--pr <num> | branch] [args]  run ocr-box review in the worktree against main branch
+#   wt path [-m | branch]                print worktree path (-m or no arg for main worktree)
+#   wt init [fish]                       print fish shell wrapper (auto-cd on add/rm/merge/ocr/cd)
+#
+# Env knobs:
+#   WT_DIR   sibling parent directory name under <project_root>/.. (default "worktrees",
+#            e.g. WT_DIR=agents -> <project_root>/../agents/<project>/<name>)
+set -euo pipefail
+
+case "${1:-}" in
+-h | --help | help)
+  sed -n '2,15s/^# \{0,1\}//p' "$0"
+  exit 0
+  ;;
+init)
+  cat <<'FISH'
+function wt --wraps="git worktree"
+    switch $argv[1]
+        case add
+            set -l dir (command wt $argv); or return
+            test -d "$dir"; and cd "$dir"
+        case cd
+            set -l dir (command wt path $argv[2..]); or return
+            test -d "$dir"; and cd "$dir"
+        case rm remove merge
+            set -l main (command wt path -m 2>/dev/null)
+            command wt $argv; or return
+            test -d "$PWD"; or test -z "$main"; or cd "$main"
+        case ocr
+            set -l f (mktemp)
+            WT_CD_FILE=$f command wt $argv
+            set -l rc $status
+            if test -s "$f"
+                set -l dir (cat "$f")
+                test -d "$dir"; and cd "$dir"
+            end
+            rm -f "$f"
+            return $rc
+        case '*'
+            command wt $argv
+    end
+end
+complete -c wt -f
+complete -c wt -n "not __fish_seen_subcommand_from add rm remove merge ocr cd path ls list init" \
+    -a "add rm merge ocr cd path ls"
+complete -c wt -n "__fish_seen_subcommand_from rm remove merge ocr cd path" \
+    -a "(git worktree list --porcelain 2>/dev/null | string replace -r -f '^branch refs/heads/' '')"
+FISH
+  exit 0
+  ;;
+esac
+
+self="${BASH_SOURCE[0]}"
+while [[ -L $self ]]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ $self == /* ]] || self="$dir/$self"
+done
+tools_dir="$(cd -P "$(dirname "$self")" && pwd)"
+
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+  echo "error: not in a git repository" >&2
+  exit 1
+}
+main_root="$(dirname "$common_dir")"
+project="$(basename "$main_root")"
+wt_base="$(cd -P "$main_root/.." && pwd)/${WT_DIR:-worktrees}/$project"
+
+# Slugify slashes to dashes so `basename $PWD` (used by *-box for container and
+# volume names) stays unique for branches like feat/auth.
+wt_dir() { printf '%s/%s\n' "$wt_base" "${1//\//-}"; }
+
+main_branch() {
+  local b
+  b="$(git -C "$main_root" branch --show-current)"
+  [[ -n "$b" ]] && { printf '%s\n' "$b"; return; }
+  git -C "$main_root" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || printf 'HEAD\n'
+}
+
+# Same <slug>-<cksum> key as _box_data_prefix in agent-box-lib.bash.
+wt_box_proj() {
+  local d="$1"
+  printf '%s-%s' "$(basename "$d" | tr -c 'A-Za-z0-9_.\n-' '-')" "$(printf '%s' "$d" | cksum | cut -d' ' -f1)"
+}
+
+wt_box_running() {
+  local proj lock pid
+  proj="$(wt_box_proj "$1")"
+  for lock in "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agentbox-locks"/*"-$proj"; do
+    [[ -d "$lock" ]] || continue
+    pid="$(cat "$lock/pid" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+wt_box_cleanup() {
+  local proj ctr vols=() v db lock
+  proj="$(wt_box_proj "$1")"
+  if [[ $(uname -s) == Linux ]]; then
+    command -v podman >/dev/null 2>&1 && ctr=podman || ctr=
+    if [[ -n "$ctr" ]]; then
+      while IFS= read -r v; do
+        [[ $v == agentbox-*-"$proj"-* ]] && vols+=("$v")
+      done < <(podman volume ls -q 2>/dev/null || true)
+    fi
+  else
+    command -v container >/dev/null 2>&1 && ctr=container || ctr=
+    if [[ -n "$ctr" ]]; then
+      while IFS= read -r v; do
+        [[ $v == agentbox-*-"$proj"-* ]] && vols+=("$v")
+      done < <(container volume list --format json 2>/dev/null |
+        grep -o '"name" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' || true)
+    fi
+  fi
+  if [[ ${#vols[@]} -gt 0 ]]; then
+    "$ctr" volume rm "${vols[@]}" >/dev/null 2>&1 || true
+  fi
+  for db in "${OC_BOX_HOME:-$HOME/.opencode-box}/.local/share/opencode/agentbox-"*"-$proj.db"*; do
+    [[ -e "$db" ]] && rm -f "$db"
+  done
+  for lock in "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agentbox-locks"/*"-$proj"; do
+    [[ -d "$lock" ]] && rm -rf "$lock"
+  done
+  return 0
+}
+
+# Resolve target worktree -> sets WT_TARGET_DIR and WT_TARGET_BRANCH.
+wt_resolve() {
+  if [[ $# -eq 0 || -z "$1" ]]; then
+    WT_TARGET_DIR="$(git rev-parse --path-format=absolute --show-toplevel)"
+    [[ "$WT_TARGET_DIR" != "$main_root" ]] || {
+      echo "error: in main worktree; pass a branch name" >&2
+      exit 1
+    }
+    WT_TARGET_BRANCH="$(git branch --show-current)"
+  else
+    WT_TARGET_DIR="$(wt_dir "$1")"
+    if [[ -d "$WT_TARGET_DIR" ]]; then
+      WT_TARGET_BRANCH="$(git -C "$WT_TARGET_DIR" branch --show-current)"
+    else
+      WT_TARGET_BRANCH="$1"
+    fi
+  fi
+}
+
+cmd="${1:-ls}"
+[[ $# -gt 0 ]] && shift
+
+case "$cmd" in
+add)
+  with_changes=0
+  pr=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -w | --with-changes)
+      with_changes=1
+      shift
+      ;;
+    --pr)
+      [[ $# -ge 2 ]] || { echo "error: --pr requires a number or URL" >&2; exit 1; }
+      pr="${2##*/}"
+      shift 2
+      ;;
+    --pr=*)
+      pr="${1#--pr=}"
+      pr="${pr##*/}"
+      shift
+      ;;
+    -*)
+      echo "error: unknown flag '$1'" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+    esac
+  done
+
+  if [[ -n "$pr" ]]; then
+    [[ "$pr" =~ ^[0-9]+$ ]] || { echo "error: invalid PR number '$pr'" >&2; exit 1; }
+    branch="${1:-pr-$pr}"
+    dir="$(wt_dir "$branch")"
+    mkdir -p "$wt_base"
+    if [[ -d "$dir" ]]; then
+      git -C "$dir" fetch origin "pull/$pr/head" >&2
+      git -C "$dir" merge --ff-only FETCH_HEAD >&2
+    else
+      git -C "$main_root" fetch origin "pull/$pr/head:$branch" >&2
+      git worktree add "$dir" "$branch" >&2
+    fi
+  else
+    [[ $# -ge 1 && $# -le 2 ]] || {
+      echo "usage: wt add [-w] <branch> [base] | wt add --pr <num> [branch]" >&2
+      exit 1
+    }
+    branch="$1"
+    base="${2:-HEAD}"
+    dir="$(wt_dir "$branch")"
+  fi
+
+  stashed=0
+  if [[ $with_changes -eq 1 && -n "$(git status --porcelain)" ]]; then
+    git stash push -u -q -m "wt-add-$branch"
+    stashed=1
+  fi
+
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p "$wt_base"
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+      git worktree add "$dir" "$branch" >&2
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      git worktree add --track -b "$branch" "$dir" "origin/$branch" >&2
+    else
+      git worktree add -b "$branch" "$dir" "$base" >&2
+    fi
+  fi
+
+  # Copy (never symlink) untracked .env* files from main_root so *-box VMs can read them.
+  for f in "$main_root"/.env*; do
+    [[ -f "$f" && ! -e "$dir/$(basename "$f")" ]] && cp -p "$f" "$dir/"
+  done
+
+  if [[ $stashed -eq 1 ]]; then
+    git -C "$dir" stash pop -q >&2
+  fi
+  printf '%s\n' "$dir"
+  ;;
+
+rm | remove)
+  force=()
+  bflag="-d"
+  if [[ "${1:-}" == "-f" || "${1:-}" == "--force" ]]; then
+    force=(--force)
+    bflag="-D"
+    shift
+  fi
+  wt_resolve ${1+"$1"}
+  cd "$main_root"
+  for f in "$main_root"/.env*; do
+    base="$(basename "$f")"
+    if [[ -f "$f" ]] && cmp -s "$f" "$WT_TARGET_DIR/$base" &&
+      ! git -C "$WT_TARGET_DIR" ls-files --error-unmatch "$base" >/dev/null 2>&1; then
+      rm -f "$WT_TARGET_DIR/$base"
+    fi
+  done
+  git worktree remove ${force[@]+"${force[@]}"} "$WT_TARGET_DIR" >&2
+  rmdir "$wt_base" 2>/dev/null || true
+  if [[ -n "$WT_TARGET_BRANCH" ]]; then
+    git -C "$main_root" branch "$bflag" "$WT_TARGET_BRANCH" >&2
+  fi
+  wt_box_cleanup "$WT_TARGET_DIR"
+  ;;
+
+merge)
+  strategy="merge"
+  case "${1:-}" in
+  --rebase | -r)
+    strategy="rebase"
+    shift
+    ;;
+  --squash | -s)
+    strategy="squash"
+    shift
+    ;;
+  esac
+  wt_resolve ${1+"$1"}
+  [[ -n "$WT_TARGET_BRANCH" ]] || {
+    echo "error: worktree at $WT_TARGET_DIR has no branch checked out" >&2
+    exit 1
+  }
+  cd "$main_root"
+  mb="$(main_branch)"
+  case "$strategy" in
+  rebase)
+    git -C "$WT_TARGET_DIR" rebase "$mb" >&2
+    git -C "$main_root" merge --ff-only "$WT_TARGET_BRANCH" >&2
+    "$0" rm "$WT_TARGET_BRANCH"
+    ;;
+  squash)
+    git -C "$main_root" merge --squash "$WT_TARGET_BRANCH" >&2
+    git -C "$main_root" commit --no-edit >&2
+    "$0" rm -f "$WT_TARGET_BRANCH"
+    ;;
+  merge)
+    git -C "$main_root" merge --no-edit "$WT_TARGET_BRANCH" >&2
+    "$0" rm "$WT_TARGET_BRANCH"
+    ;;
+  esac
+  ;;
+
+ocr)
+  pr=""
+  target=""
+  box_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --pr)
+      [[ $# -ge 2 ]] || { echo "error: --pr requires a number or URL" >&2; exit 1; }
+      pr="$2"
+      shift 2
+      ;;
+    --pr=*)
+      pr="${1#--pr=}"
+      shift
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || { echo "error: --profile requires an argument" >&2; exit 1; }
+      box_args+=("$1" "$2")
+      shift 2
+      ;;
+    --)
+      shift
+      box_args+=("$@")
+      break
+      ;;
+    -*)
+      box_args+=("$1")
+      shift
+      ;;
+    *)
+      if [[ -z "$target" && -z "$pr" && ${#box_args[@]} -eq 0 ]] &&
+        { [[ -d "$(wt_dir "$1")" ]] || git show-ref --verify --quiet "refs/heads/$1" 2>/dev/null; }; then
+        target="$1"
+      else
+        box_args+=("$1")
+      fi
+      shift
+      ;;
+    esac
+  done
+
+  if [[ -n "$pr" ]]; then
+    dir="$("$0" add --pr "$pr")"
+  elif [[ -n "$target" ]]; then
+    dir="$("$0" add "$target")"
+  else
+    dir="$(git rev-parse --path-format=absolute --show-toplevel)"
+  fi
+  [[ -n "${WT_CD_FILE:-}" ]] && printf '%s\n' "$dir" >"$WT_CD_FILE"
+
+  mb="$(main_branch)"
+  # Default to reviewing the branch/PR commit range against main_branch when no
+  # subcommand (review/scan/session) was given; if the working tree itself has
+  # uncommitted changes and wasn't --pr, bare `review` reviews those changes.
+  has_sub=0
+  for a in ${box_args[@]+"${box_args[@]}"}; do
+    case "$a" in
+    review | scan | session | init | config) has_sub=1 ;;
+    esac
+  done
+  if [[ $has_sub -eq 0 ]]; then
+    if [[ -n "$pr" || -z "$(git -C "$dir" status --porcelain)" ]]; then
+      box_args+=(review --from "$mb" --to HEAD)
+    else
+      box_args+=(review)
+    fi
+  fi
+  (cd "$dir" && "$tools_dir/ocr-box" ${box_args[@]+"${box_args[@]}"})
+  ;;
+
+path)
+  if [[ $# -eq 0 || "${1:-}" == "-m" || "${1:-}" == "--main" ]]; then
+    printf '%s\n' "$main_root"
+  else
+    wt_resolve "$1"
+    printf '%s\n' "$WT_TARGET_DIR"
+  fi
+  ;;
+
+ls | list)
+  if [[ $# -gt 0 ]]; then
+    git worktree list "$@"
+    exit 0
+  fi
+  mb="$(main_branch)"
+  while IFS= read -r line; do
+    wt_path="${line%% *}"
+    tags=()
+    if [[ -d "$wt_path" ]]; then
+      [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]] && tags+=("dirty")
+      if [[ "$wt_path" != "$main_root" ]]; then
+        counts="$(git -C "$wt_path" rev-list --left-right --count "$mb...HEAD" 2>/dev/null || true)"
+        if [[ -n "$counts" ]]; then
+          behind="${counts%%$'\t'*}"
+          ahead="${counts##*$'\t'}"
+          [[ "${ahead:-0}" -gt 0 ]] && tags+=("+$ahead")
+          [[ "${behind:-0}" -gt 0 ]] && tags+=("-$behind")
+        fi
+      fi
+      wt_box_running "$wt_path" && tags+=("running")
+    fi
+    if [[ ${#tags[@]} -gt 0 ]]; then
+      IFS=,
+      printf '%s  (%s)\n' "$line" "${tags[*]}"
+      unset IFS
+    else
+      printf '%s\n' "$line"
+    fi
+  done < <(git worktree list)
+  ;;
+
+*)
+  echo "error: unknown command '$cmd' (try: wt --help)" >&2
+  exit 1
+  ;;
+esac
