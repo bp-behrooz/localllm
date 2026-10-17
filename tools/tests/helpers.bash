@@ -3,6 +3,7 @@
 TOOLS="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
 
 setup() {
+  BATS_TEST_TMPDIR="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"
   export HOME="$BATS_TEST_TMPDIR/home"
   export XDG_STATE_HOME="$HOME/.local/state" XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run"
   export FAKE_DIR="$BATS_TEST_TMPDIR/fake"
