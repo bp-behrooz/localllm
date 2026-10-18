@@ -58,3 +58,15 @@ make_repo() {
   [[ $status -eq 0 && $output == *"Box Test: from the box"* ]]
   [[ $(git -C ../../main log -1 --format=%s foo) == "from the box" ]]
 }
+
+@test "git works in a multi-repo workspace, and commits land in each main repo" {
+  make_repo alpha
+  make_repo beta
+  git -C alpha worktree add -q -b foo ../ws/alpha
+  git -C beta worktree add -q -b foo ../ws/beta
+  cd ws
+  box 'for r in alpha beta; do (cd $r && echo hi >f && git add f && git commit -qm "from $r"); done'
+  [[ $status -eq 0 ]]
+  [[ $(git -C ../alpha log -1 --format=%s foo) == "from alpha" ]]
+  [[ $(git -C ../beta log -1 --format=%s foo) == "from beta" ]]
+}

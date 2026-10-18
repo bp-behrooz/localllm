@@ -128,6 +128,21 @@ wsl_note() {
   [[ ${#BOX_RUN_ARGS[@]} -eq 0 ]]
 }
 
+@test "git: a multi-repo workspace mounts each repo's .git" {
+  make_repo main1
+  make_repo main2
+  git_q -C main1 worktree add -b foo ../ws/main1
+  git_q -C main2 worktree add -b foo ../ws/main2
+  cd ws
+  load_lib
+  BOX_RUN_ARGS=()
+  _box_git_dir_volume 2>/dev/null
+  local g1 g2
+  g1="$(cd ../main1/.git && pwd -P)"
+  g2="$(cd ../main2/.git && pwd -P)"
+  [[ ${BOX_RUN_ARGS[*]} == "--volume $g1:$g1 --volume $g2:$g2" ]]
+}
+
 # ------------------------------------------------------------------ flags -----
 @test "flags: --profile NAME and --profile=NAME" {
   load_lib
@@ -547,6 +562,34 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   cd "$BATS_TEST_TMPDIR"
   run "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" init fish
   [[ $status -eq 0 && $output == *"function wt"* ]]
+}
+
+@test "wt: -g groups by branch, ls works from the feature root, --repos hits each repo" {
+  make_repo alpha
+  make_repo beta
+  local dir
+  dir="$(cd alpha && "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" add -g shared)"
+  [[ $dir == "$BATS_TEST_TMPDIR/worktrees/shared/alpha" ]]
+  (cd beta && "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" add -g shared)
+  # resolution finds the grouped worktree even though the default layout is <repo>/<branch>
+  [[ "$(cd alpha && "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" path shared)" == "$dir" ]]
+  # ls at the feature root (no repo) lists every repo's worktree
+  cd "$BATS_TEST_TMPDIR/worktrees/shared"
+  run "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" ls
+  [[ $status -eq 0 && $output == *"shared/alpha"* && $output == *"shared/beta"* ]]
+  cd "$BATS_TEST_TMPDIR"
+  git_q -C "$dir" commit --allow-empty -m "alpha change"
+  git_q -C "$BATS_TEST_TMPDIR/worktrees/shared/beta" commit --allow-empty -m "beta change"
+  (cd "$BATS_TEST_TMPDIR/worktrees/shared" && "${BOX_TEST_BASH:-bash}" "$TOOLS/wt" merge --repos)
+  [[ "$(git -C alpha log -1 --format=%s)" == "alpha change" ]]
+  [[ "$(git -C beta log -1 --format=%s)" == "beta change" ]]
+  [[ ! -d "$BATS_TEST_TMPDIR/worktrees/shared" ]]
+}
+
+@test "box-gh-token: keys outside a repo by the current directory" {
+  cd "$BATS_TEST_TMPDIR"
+  run "$TOOLS/box-gh-token" show
+  [[ $status -eq 0 && $output == *"no token for $BATS_TEST_TMPDIR"* ]]
 }
 
 

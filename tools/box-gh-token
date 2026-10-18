@@ -10,8 +10,10 @@
 # the main worktree's path. It is never written into the repo or ~/.box.*.
 set -euo pipefail
 
+# Outside git, key by $PWD so a multi-repo feature workspace (<branch>/<repo>)
+# can hold one token for the whole feature.
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
-  { echo "error: run this inside a git repository" >&2; exit 1; }
+  common="$(pwd -P)/.git"
 key=$(dirname "$common")
 
 case $(uname -s) in

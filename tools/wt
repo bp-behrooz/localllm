@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# wt: manage git worktrees under <project_root>/../${WT_DIR:-worktrees}/<project>/<name>.
+# wt: manage git worktrees under <project_root>/../${WT_DIR:-worktrees}/.
+#     Default layout is <repo>/<branch>; with -g / WT_LAYOUT=branch it becomes
+#     <branch>/<repo>, so one feature dir holds a worktree of every repo.
 #
 #   wt [ls]                              list worktrees with dirty / ahead-behind / box status
-#   wt add [-w] <branch> [base]          create worktree (-w moves uncommitted changes into it)
+#   wt add [-g] [-w] <branch> [base]     create worktree (-g group by branch, -w moves changes)
 #   wt add --pr <num|url> [branch]       fetch GitHub PR into a worktree (default branch: pr-<num>)
-#   wt rm [-f] [branch]                  remove worktree, branch, and its per-worktree box data
-#   wt merge [--rebase|--squash] [branch] merge branch into main worktree, then wt rm it
+#   wt rm [-f] [--repos] [branch]        remove worktree, branch, and its per-worktree box data
+#   wt merge [--repos] [--rebase|--squash] [branch] merge branch into main worktree, then wt rm it
 #   wt ocr [--pr <num> | branch] [args]  run ocr-box review in the worktree against main branch
 #   wt path [-m | branch]                print worktree path (-m or no arg for main worktree)
 #   wt cd [-m | branch]                  same as path; `cd "$(wt cd x)"` in bash
 #   wt init [fish]                       print fish shell wrapper (auto-cd on add/rm/merge/ocr/cd)
 #
 # Env knobs:
-#   WT_DIR   sibling parent directory name under <project_root>/.. (default "worktrees",
-#            e.g. WT_DIR=agents -> <project_root>/../agents/<project>/<name>)
+#   WT_DIR      sibling parent directory name under <project_root>/.. (default "worktrees")
+#   WT_LAYOUT   repo (default) = <repo>/<branch>; branch = <branch>/<repo>
 set -euo pipefail
 
 case "${1:-}" in
 -h | --help | help)
-  sed -n '2,15s/^# \{0,1\}//p' "$0"
+  sed -n '2,18s/^# \{0,1\}//p' "$0"
   exit 0
   ;;
 init)
@@ -64,10 +66,12 @@ end
 complete -c wt -n "test -z (__wt_sub)" -a "add rm remove merge ocr cd path ls list init"
 complete -c wt -n "__fish_seen_subcommand_from init" -a fish
 complete -c wt -n "__fish_seen_subcommand_from add" -s w -l with-changes -d 'move uncommitted changes'
+complete -c wt -n "__fish_seen_subcommand_from add" -s g -l group -d 'group by branch (<branch>/<repo>)'
 complete -c wt -n "__fish_seen_subcommand_from add" -l pr -d 'fetch GitHub PR'
 complete -c wt -n "__fish_seen_subcommand_from rm remove" -s f -l force -d 'force remove'
 complete -c wt -n "__fish_seen_subcommand_from merge" -l rebase -s r -d 'rebase then ff'
 complete -c wt -n "__fish_seen_subcommand_from merge" -l squash -s s -d 'squash merge'
+complete -c wt -n "__fish_seen_subcommand_from rm remove merge" -l repos -d 'every repo in the feature'
 complete -c wt -n "__fish_seen_subcommand_from path cd" -s m -l main -d 'main worktree'
 complete -c wt -n "__fish_seen_subcommand_from rm remove merge ocr path cd" -a "(__wt_branches)"
 complete -c wt -n "__fish_seen_subcommand_from add" -a "(__wt_branches)"
@@ -84,25 +88,55 @@ while [[ -L $self ]]; do
   self="$(readlink "$self")"
   [[ $self == /* ]] || self="$dir/$self"
 done
-tools_dir="$(cd -P "$(dirname "$self")" && pwd)"
+self="$(cd -P "$(dirname "$self")" && pwd)/$(basename "$self")"
+tools_dir="$(dirname "$self")"
 
-common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
-  echo "error: not in a git repository" >&2
-  exit 1
-}
-main_root="$(dirname "$common_dir")"
-project="$(basename "$main_root")"
-wt_base="$(cd -P "$main_root/.." && pwd)/${WT_DIR:-worktrees}/$project"
+main_root="" project="" wt_root="" wt_base=""
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common_dir=""
+if [[ -n "$common_dir" ]]; then
+  main_root="$(dirname "$common_dir")"
+  project="$(basename "$main_root")"
+  wt_root="$(cd -P "$main_root/.." && pwd)/${WT_DIR:-worktrees}"
+  wt_base="$wt_root/$project"
+fi
+wt_layout="${WT_LAYOUT:-repo}"
 
 # Slugify slashes to dashes so `basename $PWD` (used by *-box for container and
 # volume names) stays unique for branches like feat/auth.
-wt_dir() { printf '%s/%s\n' "$wt_base" "${1//\//-}"; }
+wt_slug() { printf '%s' "${1//\//-}"; }
+
+# Path of this repo's worktree for a branch. Prefers whichever layout already
+# has it on disk; creation follows WT_LAYOUT / -g (repo = <repo>/<branch>,
+# branch = <branch>/<repo>).
+wt_dir() {
+  local slug old new
+  slug="$(wt_slug "$1")"
+  old="$wt_base/$slug"
+  new="$wt_root/$slug/$project"
+  if [[ -d "$old" ]]; then
+    printf '%s\n' "$old"
+  elif [[ -d "$new" ]]; then
+    printf '%s\n' "$new"
+  elif [[ "$wt_layout" == branch ]]; then
+    printf '%s\n' "$new"
+  else
+    printf '%s\n' "$old"
+  fi
+}
+
+# Every git worktree directly under a feature group dir.
+wt_repo_dirs() {
+  local d
+  for d in "$1"/*/; do
+    [[ -e "$d/.git" ]] && printf '%s\n' "${d%/}"
+  done
+}
 
 main_branch() {
-  local b
-  b="$(git -C "$main_root" branch --show-current)"
+  local root="${1:-$main_root}" b
+  b="$(git -C "$root" branch --show-current)"
   [[ -n "$b" ]] && { printf '%s\n' "$b"; return; }
-  git -C "$main_root" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || printf 'HEAD\n'
+  git -C "$root" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || printf 'HEAD\n'
 }
 
 # Same <slug>-<cksum> key as _box_data_prefix in agent-box-lib.bash.
@@ -155,6 +189,10 @@ wt_box_cleanup() {
 
 # Resolve target worktree -> sets WT_TARGET_DIR and WT_TARGET_BRANCH.
 wt_resolve() {
+  [[ -n "$main_root" ]] || {
+    echo "error: not in a git repository" >&2
+    exit 1
+  }
   if [[ $# -eq 0 || -z "$1" ]]; then
     WT_TARGET_DIR="$(git rev-parse --path-format=absolute --show-toplevel)"
     [[ "$WT_TARGET_DIR" != "$main_root" ]] || {
@@ -172,17 +210,85 @@ wt_resolve() {
   fi
 }
 
+# Run a command in every repo worktree of the feature group that contains $PWD
+# (or is $PWD itself outside a repo). Used by --repos.
+wt_repos_foreach() {
+  local cmd="$1" top group d rc=0 dirs=()
+  shift
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$top" ]]; then
+    [[ "$top" == "$main_root" ]] && {
+      echo "error: --repos: run from a feature workspace, not the main worktree" >&2
+      return 1
+    }
+    group="$(dirname "$top")"
+  else
+    group="$PWD"
+  fi
+  while IFS= read -r d; do dirs+=("$d"); done < <(wt_repo_dirs "$group")
+  [[ ${#dirs[@]} -gt 0 ]] || {
+    echo "error: --repos: no repo worktrees under $group" >&2
+    return 1
+  }
+  for d in "${dirs[@]}"; do
+    (cd "$d" && "$self" "$cmd" "$@") || rc=$?
+  done
+  return $rc
+}
+
+# wt_ls_path LINE PATH MAIN_ROOT MAIN_BRANCH: print one worktree with its tags.
+wt_ls_path() {
+  local line="$1" wt_path="$2" root="$3" mb="$4" tags=() counts ahead behind
+  if [[ -d "$wt_path" ]]; then
+    [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]] && tags+=("dirty")
+    if [[ "$wt_path" != "$root" ]]; then
+      counts="$(git -C "$wt_path" rev-list --left-right --count "$mb...HEAD" 2>/dev/null || true)"
+      if [[ -n "$counts" ]]; then
+        behind="${counts%%$'\t'*}"
+        ahead="${counts##*$'\t'}"
+        [[ "${ahead:-0}" -gt 0 ]] && tags+=("+$ahead")
+        [[ "${behind:-0}" -gt 0 ]] && tags+=("-$behind")
+      fi
+    fi
+    wt_box_running "$wt_path" && tags+=("running")
+  fi
+  if [[ ${#tags[@]} -gt 0 ]]; then
+    IFS=,
+    printf '%s  (%s)\n' "$line" "${tags[*]}"
+    unset IFS
+  else
+    printf '%s\n' "$line"
+  fi
+}
+
+wt_ls_repo() {
+  local root="$1" mb line wt_path
+  mb="$(main_branch "$root")"
+  while IFS= read -r line; do
+    wt_path="${line%% *}"
+    wt_ls_path "$line" "$wt_path" "$root" "$mb"
+  done < <(git -C "$root" worktree list)
+}
+
 cmd="${1:-ls}"
 [[ $# -gt 0 ]] && shift
 
 case "$cmd" in
 add)
+  [[ -n "$main_root" ]] || {
+    echo "error: not in a git repository" >&2
+    exit 1
+  }
   with_changes=0
   pr=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
     -w | --with-changes)
       with_changes=1
+      shift
+      ;;
+    -g | --group)
+      wt_layout=branch
       shift
       ;;
     --pr)
@@ -209,7 +315,7 @@ add)
     [[ "$pr" =~ ^[0-9]+$ ]] || { echo "error: invalid PR number '$pr'" >&2; exit 1; }
     branch="${1:-pr-$pr}"
     dir="$(wt_dir "$branch")"
-    mkdir -p "$wt_base"
+    mkdir -p "$(dirname "$dir")"
     if [[ -d "$dir" ]]; then
       git -C "$dir" fetch origin "pull/$pr/head" >&2
       git -C "$dir" merge --ff-only FETCH_HEAD >&2
@@ -219,7 +325,7 @@ add)
     fi
   else
     [[ $# -ge 1 && $# -le 2 ]] || {
-      echo "usage: wt add [-w] <branch> [base] | wt add --pr <num> [branch]" >&2
+      echo "usage: wt add [-g] [-w] <branch> [base] | wt add --pr <num> [branch]" >&2
       exit 1
     }
     branch="$1"
@@ -234,7 +340,7 @@ add)
   fi
 
   if [[ ! -d "$dir" ]]; then
-    mkdir -p "$wt_base"
+    mkdir -p "$(dirname "$dir")"
     if git show-ref --verify --quiet "refs/heads/$branch"; then
       git worktree add "$dir" "$branch" >&2
     elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
@@ -256,6 +362,20 @@ add)
   ;;
 
 rm | remove)
+  args=()
+  repos=0
+  for a in "$@"; do
+    if [[ "$a" == --repos ]]; then repos=1; else args+=("$a"); fi
+  done
+  if [[ $repos -eq 1 ]]; then
+    if [[ ${#args[@]} -gt 0 ]]; then
+      wt_repos_foreach rm "${args[@]}"
+    else
+      wt_repos_foreach rm
+    fi
+    exit
+  fi
+  if [[ ${#args[@]} -gt 0 ]]; then set -- "${args[@]}"; else set --; fi
   force=()
   bflag="-d"
   if [[ "${1:-}" == "-f" || "${1:-}" == "--force" ]]; then
@@ -273,7 +393,7 @@ rm | remove)
     fi
   done
   git worktree remove ${force[@]+"${force[@]}"} "$WT_TARGET_DIR" >&2
-  rmdir "$wt_base" 2>/dev/null || true
+  rmdir "$(dirname "$WT_TARGET_DIR")" 2>/dev/null || true
   if [[ -n "$WT_TARGET_BRANCH" ]]; then
     git -C "$main_root" branch "$bflag" "$WT_TARGET_BRANCH" >&2
   fi
@@ -281,6 +401,20 @@ rm | remove)
   ;;
 
 merge)
+  args=()
+  repos=0
+  for a in "$@"; do
+    if [[ "$a" == --repos ]]; then repos=1; else args+=("$a"); fi
+  done
+  if [[ $repos -eq 1 ]]; then
+    if [[ ${#args[@]} -gt 0 ]]; then
+      wt_repos_foreach merge "${args[@]}"
+    else
+      wt_repos_foreach merge
+    fi
+    exit
+  fi
+  if [[ ${#args[@]} -gt 0 ]]; then set -- "${args[@]}"; else set --; fi
   strategy="merge"
   case "${1:-}" in
   --rebase | -r)
@@ -303,21 +437,25 @@ merge)
   rebase)
     git -C "$WT_TARGET_DIR" rebase "$mb" >&2
     git -C "$main_root" merge --ff-only "$WT_TARGET_BRANCH" >&2
-    "$0" rm "$WT_TARGET_BRANCH"
+    "$self" rm "$WT_TARGET_BRANCH"
     ;;
   squash)
     git -C "$main_root" merge --squash "$WT_TARGET_BRANCH" >&2
     git -C "$main_root" commit --no-edit >&2
-    "$0" rm -f "$WT_TARGET_BRANCH"
+    "$self" rm -f "$WT_TARGET_BRANCH"
     ;;
   merge)
     git -C "$main_root" merge --no-edit "$WT_TARGET_BRANCH" >&2
-    "$0" rm "$WT_TARGET_BRANCH"
+    "$self" rm "$WT_TARGET_BRANCH"
     ;;
   esac
   ;;
 
 ocr)
+  [[ -n "$main_root" ]] || {
+    echo "error: not in a git repository" >&2
+    exit 1
+  }
   pr=""
   target=""
   box_args=()
@@ -359,9 +497,9 @@ ocr)
   done
 
   if [[ -n "$pr" ]]; then
-    dir="$("$0" add --pr "$pr")"
+    dir="$("$self" add --pr "$pr")"
   elif [[ -n "$target" ]]; then
-    dir="$("$0" add "$target")"
+    dir="$("$self" add "$target")"
   else
     dir="$(git rev-parse --path-format=absolute --show-toplevel)"
   fi
@@ -398,34 +536,22 @@ path | cd)
 
 ls | list)
   if [[ $# -gt 0 ]]; then
-    git worktree list "$@"
+    [[ -n "$main_root" ]] || {
+      echo "error: not in a git repository" >&2
+      exit 1
+    }
+    git -C "$main_root" worktree list "$@"
     exit 0
   fi
-  mb="$(main_branch)"
-  while IFS= read -r line; do
-    wt_path="${line%% *}"
-    tags=()
-    if [[ -d "$wt_path" ]]; then
-      [[ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]] && tags+=("dirty")
-      if [[ "$wt_path" != "$main_root" ]]; then
-        counts="$(git -C "$wt_path" rev-list --left-right --count "$mb...HEAD" 2>/dev/null || true)"
-        if [[ -n "$counts" ]]; then
-          behind="${counts%%$'\t'*}"
-          ahead="${counts##*$'\t'}"
-          [[ "${ahead:-0}" -gt 0 ]] && tags+=("+$ahead")
-          [[ "${behind:-0}" -gt 0 ]] && tags+=("-$behind")
-        fi
-      fi
-      wt_box_running "$wt_path" && tags+=("running")
-    fi
-    if [[ ${#tags[@]} -gt 0 ]]; then
-      IFS=,
-      printf '%s  (%s)\n' "$line" "${tags[*]}"
-      unset IFS
-    else
-      printf '%s\n' "$line"
-    fi
-  done < <(git worktree list)
+  if [[ -n "$main_root" ]]; then
+    wt_ls_repo "$main_root"
+  else
+    # Feature workspace: each subdir is a worktree of a different repo.
+    while IFS= read -r d; do
+      wt_ls_root="$(dirname "$(git -C "$d" rev-parse --path-format=absolute --git-common-dir)")"
+      wt_ls_path "$d" "$d" "$wt_ls_root" "$(main_branch "$wt_ls_root")"
+    done < <(wt_repo_dirs "$PWD")
+  fi
   ;;
 
 *)

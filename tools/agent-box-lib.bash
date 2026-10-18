@@ -952,13 +952,30 @@ _box_runtime_args() {
 # repo's .git, outside $PWD, so git in the box can't find its objects. Mount
 # that dir at its own path too. Read-write: commits, refs and the index live
 # there.
+#
+# $PWD may also be a multi-repo workspace (each direct subdir a worktree), e.g.
+# wt adds with -g; then every repo's .git is mounted, not just one.
 _box_git_dir_volume() {
-  local common here
-  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  local here d common c dirs=() commons=()
   here="$(pwd -P)"
-  [[ $common == "$here" || $common == "$here"/* ]] && return 0
-  BOX_RUN_ARGS+=(--volume "$common:$common")
-  echo "==> git: $common (outside \$PWD)" >&2
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    dirs=("$here")
+  else
+    for d in "$here"/*/; do
+      [[ -e "$d/.git" ]] && dirs+=("${d%/}")
+    done
+  fi
+  [[ ${#dirs[@]} -gt 0 ]] || return 0
+  for d in "${dirs[@]}"; do
+    common="$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
+    [[ $common == "$here" || $common == "$here"/* ]] && continue
+    for c in ${commons[@]+"${commons[@]}"}; do
+      [[ $c == "$common" ]] && continue 2
+    done
+    commons+=("$common")
+    BOX_RUN_ARGS+=(--volume "$common:$common")
+    echo "==> git: $common (outside \$PWD)" >&2
+  done
 }
 
 # Fills BOX_RUN_ARGS with the flags every box passes: the project mounted at its
