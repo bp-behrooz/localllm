@@ -21,7 +21,10 @@ client → Caddy (TLS, public) → pool.py :4000 (auth + scheduler) → llama-se
 ## Requirements
 
 - Linux with systemd (developed on Arch), two GPUs visible to ROCm
-- `llama-server` (ROCm build) in `PATH`
+- `podman` and `crun`: `llama-server` runs from ggml-org's ROCm image
+  (`ghcr.io/ggml-org/llama.cpp`, server-rocm), pinned by digest in
+  `pool/serve-llama.sh` and pulled on first use (~7 GiB). No host ROCm or
+  llama.cpp needed; bump the pin for newer model architectures
 - `python3`; everything else installs into `/opt/localllm/venv`
 - A HuggingFace read token for gated model repos
 
@@ -184,7 +187,7 @@ sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 
 sudo systemctl restart localllm
 ```
 
-The image is pinned by digest in `serve-radiance.sh` (currently 1.12.0), since
+The radiance image is pinned by digest in `serve-radiance.sh` (currently 1.12.0), since
 radiance releases rename and drop engine flags; upgrade by changing that pin
 and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
 driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,

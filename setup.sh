@@ -9,7 +9,7 @@
 # Requires pool/pool.py next to this script.
 set -euo pipefail
 
-# HIP device indices of the two R9700s — verify with `llama-server --list-devices`
+# HIP device indices of the two R9700s — verify with `rocm-smi --showid`
 GPUS=(0 1)
 
 # name -> "gpus|model|extra llama-server args"
@@ -185,18 +185,19 @@ remove)
 *) usage ;;
 esac
 
-LLAMA_BIN="$(command -v llama-server)"
+# llama-server runs from the ggml-org ROCm image (pinned in serve-llama.sh)
+LLAMA_BIN=/opt/localllm/serve-llama.sh
 [[ -f "$(dirname "$0")/pool/pool.py" ]] || { echo "pool/pool.py not found next to $0"; exit 1; }
 
 # ---------- one-time provisioning (idempotent, skipped when done) ----------
 id localllm &>/dev/null || useradd -r -m -d /opt/localllm -s "$(command -v nologin)" localllm
 usermod -aG render,video localllm
-# cmd presets run their containers under rootless podman as this user: no daemon,
+# every preset runs its container under rootless podman as this user: no daemon,
 # no root-equivalent docker group, and what a container writes stays localllm-owned.
 # It needs its own subuid/subgid range (placed after every existing one) and a
 # lingering user manager for /run/user/<uid>.
 for c in podman crun; do
-  command -v "$c" >/dev/null || echo "warning: $c not found; cmd presets need it (pacman -S $c)"
+  command -v "$c" >/dev/null || echo "warning: $c not found; every preset needs it (pacman -S $c)"
 done
 id -nG localllm | grep -qw docker && gpasswd -d localllm docker
 for f in subuid subgid; do # podman needs both; check each on its own
@@ -260,6 +261,7 @@ chmod 600 /opt/localllm/env
 } >/opt/localllm/pool.json
 install -m 644 "$(dirname "$0")/pool/pool.py" /opt/localllm/pool.py
 install -m 755 "$(dirname "$0")/pool/serve-radiance.sh" /opt/localllm/serve-radiance.sh
+install -m 755 "$(dirname "$0")/pool/serve-llama.sh" /opt/localllm/serve-llama.sh
 
 # not podman's storage: its image layers are owned by localllm's subuids
 find /opt/localllm -path /opt/localllm/.local/share/containers -prune \
@@ -273,7 +275,7 @@ uid=$(id -u localllm)
 cat >/etc/systemd/system/localllm.service <<EOF
 [Unit]
 Description=localllm GPU pool server
-# rootless podman (cmd presets) wants the user's runtime dir and systemd bus
+# rootless podman wants the user's runtime dir and systemd bus
 Wants=user@$uid.service
 After=user@$uid.service
 
