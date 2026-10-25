@@ -66,7 +66,10 @@ hf_fetch() { # <preset>
     # .rads land flat by file name, so two repos can't share one name
     local p rad=$RAD repo=$RAD_REPO
     for p in "${!PRESET[@]}"; do
-      if [[ "$p" != "$1" ]] && is_radiance "$p" && [[ "$RAD" == "$rad" && "$RAD_REPO" != "$repo" ]]; then
+      # the subshell first: a malformed other preset makes is_radiance exit,
+      # and that's for its own download to report, not this one's
+      if [[ "$p" != "$1" ]] && (is_radiance "$p") 2>/dev/null && is_radiance "$p" \
+          && [[ "$RAD" == "$rad" && "$RAD_REPO" != "$repo" ]]; then
         echo "$1 and $p both name $rad, from $repo and $RAD_REPO; rename one" >&2
         exit 1
       fi
@@ -164,6 +167,7 @@ remove)
     done
     rm -f "/opt/localllm/models/$RAD"
     echo "removed $2's /opt/localllm/models/$RAD"
+    [[ "$RAD_REPO" == - ]] && echo "it was converted locally: download can't bring it back, the README's conversion can"
     echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed)"
     exit 0
   fi

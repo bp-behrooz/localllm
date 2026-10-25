@@ -13,6 +13,10 @@ for _ in $(seq 240); do
   (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || break
   sleep 0.5
 done
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  echo "port $PORT still held after 2 minutes; not starting $NAME" >&2
+  exit 1
+fi
 HUB=/opt/localllm/.cache/huggingface/hub
 # pinned by digest (b11870): bump it for newer model architectures
 IMAGE=${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:bfb6ee07f3100d337752cdb6ff634f9cc666c90a6dfdb1739f65284687c8117c}

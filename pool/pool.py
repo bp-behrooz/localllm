@@ -259,18 +259,23 @@ def _rm_orphans():
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"[pool] podman ps: {e}", file=sys.stderr)
         return
+    if r.returncode != 0:
+        print(f"[pool] podman ps exited {r.returncode}; orphans not cleaned up", file=sys.stderr)
+        return
     orphans = r.stdout.split()
     if orphans:
         print(f"[pool] removing orphaned containers: {' '.join(orphans)}", file=sys.stderr)
         _rm_containers(orphans)
 
 
-def _alive(name):
+async def _alive(name):
     live, dead = [], []
     for i in instances.get(name, []):
         (live if i.proc.poll() is None else dead).append(i)
-    # the launcher is gone, but conmon may still run its container
-    _rm_containers([i.container for i in dead])
+    # the launcher is gone, but conmon may still run its container; podman
+    # blocks, so off the loop (the caller holds the lock, keeping its GPUs)
+    if dead:
+        await asyncio.to_thread(_rm_containers, [i.container for i in dead])
     if live:
         instances[name] = live
     else:
@@ -291,12 +296,15 @@ def _forget(inst):
         instances.pop(inst.name, None)
 
 
-def _drop(inst):
-    inst.stop()
+async def _drop(inst):
+    # stop() blocks (podman stop, proc.wait); run it in a thread so health
+    # checks and other streams keep flowing. Callers hold the lock, so no new
+    # instance lands on these GPUs until they're free.
+    await asyncio.to_thread(inst.stop)
     _forget(inst)
 
 
-def _evict_one(min_idle=0.0, exclude=None):
+async def _evict_one(min_idle=0.0, exclude=None):
     """Stop the best victim; duplicates go before a model's last instance."""
     now = time.monotonic()
     idle = [i for lst in instances.values() for i in lst
@@ -305,7 +313,7 @@ def _evict_one(min_idle=0.0, exclude=None):
     if not idle:
         return False
     idle.sort(key=lambda i: (len(instances[i.name]) == 1, i.last_used))
-    _drop(idle[0])
+    await _drop(idle[0])
     return True
 
 
@@ -322,10 +330,10 @@ async def acquire(name):
     """Return a ready Instance for `name`, or None if every GPU is busy."""
     async with lock:
         need = PRESETS[name]["gpus"]
-        pool = _alive(name)
+        pool = await _alive(name)
         if not pool:
             while len(_free_gpus()) < need:
-                if not _evict_one():
+                if not await _evict_one():
                     return None
             free = _free_gpus()
             # eager pair: whole pool free and no download race possible
@@ -336,7 +344,7 @@ async def acquire(name):
             # scale out: every instance is busy; use a free GPU, or one whose
             # model has sat idle a good while
             if not _free_gpus():
-                _evict_one(min_idle=IDLE_SCALE_EVICT, exclude=name)
+                await _evict_one(min_idle=IDLE_SCALE_EVICT, exclude=name)
             free = _free_gpus()
             if free:
                 pool.append(Instance(name, [free[0]]))
@@ -347,7 +355,7 @@ async def acquire(name):
         await asyncio.shield(inst.loader)
     except Exception:
         async with lock:
-            _drop(inst)
+            await _drop(inst)
         raise
     return inst
 
@@ -427,7 +435,7 @@ async def reap_idle():
             ttl = idle_ttl(name)
             if not ttl:
                 continue
-            for inst in list(_alive(name)):
+            for inst in list(await _alive(name)):
                 # skip in-flight work and instances still loading (a first
                 # start may be downloading the model for a long time)
                 if inst.inflight or not inst.loader.done() \
@@ -435,11 +443,7 @@ async def reap_idle():
                     continue
                 print(f"[pool] unloading {name} on GPU {inst.gpus}: idle "
                       f"{int(now - inst.last_used)}s (ttl {ttl}s)", file=sys.stderr)
-                # stop() blocks (podman stop, proc.wait); run it in a thread so
-                # health checks and streams keep flowing. The lock stays held,
-                # so no new instance lands on these GPUs until they're free.
-                await asyncio.to_thread(inst.stop)
-                _forget(inst)
+                await _drop(inst)
 
 
 async def reaper():
@@ -524,8 +528,11 @@ def selftest():
     subprocess.Popen = fake_popen
     ran = []
     orphans = []  # what the fake `podman ps` lists
+    ps_rc = [0]   # and its exit code
     class FakeRun:
-        def __init__(self, cmd): self.stdout = "\n".join(orphans) if "ps" in cmd else ""
+        def __init__(self, cmd):
+            self.stdout = "\n".join(orphans) if "ps" in cmd else ""
+            self.returncode = ps_rc[0] if "ps" in cmd else 0
     def fake_run(cmd, **kw):
         ran.append(cmd)
         return FakeRun(cmd)
@@ -595,8 +602,22 @@ def selftest():
         assert env["NAME"] == f"pool-rad-{rad.port}"
         # ...and stopping it stops its container too (as for every preset)
         ran.clear()
-        _drop(rad)
+        await _drop(rad)
         assert ran == [["podman", "stop", "-i", "-t", "30", env["NAME"]]], ran
+        # ...off the event loop: a slow stop doesn't stall other requests
+        slow = await acquire("big")
+        slow.stop = lambda: time.sleep(0.3)
+        ticks = 0
+        async def tick():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+        ticker = asyncio.create_task(tick())
+        await asyncio.sleep(0)
+        await _drop(slow)  # ticks only advance if the loop runs meanwhile
+        ticker.cancel()
+        assert ticks >= 5 and "big" not in instances, ticks
 
         # 9. startup removes what an earlier pool left running, and only that
         ran.clear()
@@ -607,6 +628,11 @@ def selftest():
         ran.clear()
         _rm_orphans()
         assert ran[-1] == ["podman", "rm", "-f", "-i", "pool-big-8150", "pool-rad-8150"], ran
+        ps_rc[0] = 125  # podman itself failing: nothing removed on its say
+        ran.clear()
+        _rm_orphans()
+        assert len(ran) == 1 and ran[0][1] == "ps", ran
+        ps_rc[0], orphans[:] = 0, []
 
         # 10. preload: the configured default loads at startup
         global PRELOAD
@@ -662,7 +688,7 @@ def selftest():
         IDLE_TTL, IDLE_TTL_CMD = 100, 1000
         for lst in list(instances.values()):
             for i in list(lst):
-                _drop(i)
+                await _drop(i)
         assert idle_ttl("a") == 100 and idle_ttl("rad") == 1000
         PRESETS["b"]["idle_ttl"] = 0  # per-preset override: never unload
         assert idle_ttl("b") == 0
@@ -690,7 +716,7 @@ def selftest():
         b.last_used -= 10**6
         await reap_idle()
         assert "b" in instances  # ttl 0: never unloaded
-        _drop(b)
+        await _drop(b)
         # an instance still loading is never reaped, however long it takes
         loading = Instance("a", [GPUS[0]])
         loading.loader.cancel()
@@ -699,7 +725,7 @@ def selftest():
         instances["a"] = [loading]
         await reap_idle()
         assert instances["a"] == [loading]
-        _drop(loading)
+        await _drop(loading)
 
         # 11b. keys file: several keys at once, each by name; adding or
         #     revoking one takes effect without a restart

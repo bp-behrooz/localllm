@@ -44,15 +44,17 @@ is_radiance r && [[ $RAD_REPO == StillDeadcode/x ]] || fail "suffix match took a
 # download refuses two repos for one .rad name, before fetching anything
 eval "$(sed -n '/^hf_fetch()/,/^}/p' setup.sh)"
 declare -F hf_fetch >/dev/null || fail "hf_fetch() not found in setup.sh"
-install() { echo "fetched"; }; sudo() { echo "fetched"; }   # never reached on a clash
+install() { :; }; sudo() { echo "fetched: $*"; }   # never reached on a clash
 HF_TOKEN=test   # download sources it from /opt/localllm/env
-unset 'PRESET[t]'   # the two-.rad preset dies in is_radiance before the clash check
+# PRESET[t] (two .rads) stays in: a malformed other preset mustn't sink this download
 PRESET+=([g2]="2|cmd|RAD_REPO=other/fork serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad")
 out=$(set -e; hf_fetch gemma4-heretic 2>&1); rc=$?
 [[ $rc -ne 0 && $out == *"rename one"* && $out != *fetched* ]] || fail "same .rad from two repos not refused: $out"
 unset 'PRESET[g2]'
 out=$(set -e; hf_fetch gemma4-heretic 2>&1) || fail "clash check failed a clean preset: $out"
-[[ $out == *fetched* ]] || fail "clean preset not fetched: $out"
+# the scan clobbers RAD/RAD_REPO along the way: the fetch must still be this preset's own
+[[ $out == *"hf download keptn/gemma4-31b-heretic-ara-w4a8 gemma4-31b-heretic-ara-w4a8.rad "* ]] \
+  || fail "clean preset fetched the wrong repo/file: $out"
 # a locally converted .rad (RAD_REPO=-) has nothing to download
 out=$(set -e; hf_fetch thinkingcap 2>&1) || fail "local .rad failed download: $out"
 [[ $out == *"converted locally"* && $out != *fetched* ]] || fail "local .rad not skipped: $out"
