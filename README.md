@@ -152,7 +152,7 @@ API key.
 
 ## The radiance presets
 
-Three presets run on the
+Four presets run on the
 [radiance](https://codeberg.org/StillDeadcode/radiance) engine — C++/HIP with
 RDNA4 kernels and speculative decoding — each across both GPUs:
 
@@ -166,9 +166,38 @@ RDNA4 kernels and speculative decoding — each across both GPUs:
 - `gemma4-heretic`: Gemma 4 31B heretic-ara (refusals removed) with a GPTQ
   int4 trunk, int8 activations and MTP, 64K context at 8 sequences
   (upstream's flags; 256K fits at `--max-num-seqs 2`).
+- `thinkingcap`: ThinkingCap-Qwen3.8-27B (a Qwen3.8-27B finetune that
+  reasons in fewer tokens) as block FP8 with Qwen3.8's DFlash2 drafter, the
+  same form and speed as `qwen3.8-radiance`. Nobody publishes this `.rad`, so
+  it's converted locally (below).
 
 A preset whose `.rad` isn't in a `StillDeadcode/<name>` repo names its repo
-with `RAD_REPO=<owner/repo>` in the cmd, as `gemma4-heretic` does.
+with `RAD_REPO=<owner/repo>` in the cmd, as `gemma4-heretic` does;
+`RAD_REPO=-` marks one converted locally, which `download` skips.
+
+To convert `thinkingcap` (accept the gated repo's terms on Hugging Face with
+your token's account first; needs ~85 GiB free while it runs, CPU only, the
+DFlash2 recipe from the pinned image):
+
+```bash
+cd /opt/localllm && source /opt/localllm/env      # for HF_TOKEN
+SRC=/opt/localllm/hf-src; install -d -o localllm -g localllm $SRC
+for r in bottlecapai/ThinkingCap-Qwen3.8-27B z-lab/Qwen3.8-27B-DFlash2; do
+  sudo -u localllm env HF_TOKEN="$HF_TOKEN" HF_XET_HIGH_PERFORMANCE=1 \
+    /opt/localllm/venv/bin/hf download "$r" --local-dir "$SRC/$r"
+done
+sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
+  podman run --rm --log-driver k8s-file \
+    -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
+    docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600 \
+    /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
+    --recipe /opt/radiance/share/radiance/recipes/q38-27b-fp8block-df2.recipe \
+    --set quantization_config.quant_method=fp8 --set quantization_config.fmt=e4m3 \
+    --set "quantization_config.weight_block_size=128 128" \
+    --set quantization_config.activation_scheme=dynamic \
+    -o /models/thinkingcap-qwen3.8-27b-fp8-df2.rad
+rm -rf $SRC   # once the .rad serves well
+```
 
 They're `cmd` presets: `setup.sh` installs their launcher
 (`/opt/localllm/serve-radiance.sh <model.rad> [engine flags]`), and the image

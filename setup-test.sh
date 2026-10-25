@@ -14,7 +14,9 @@ is_radiance qwen3.8-flash-next || fail "flash-next radiance preset not detected"
 [[ $RAD == qwen3.8-next-flash-fp8-iq4r-moe.rad ]] || fail "wrong RAD: $RAD"
 is_radiance gemma4-heretic || fail "gemma4-heretic radiance preset not detected"
 [[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-w4a8 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
-for p in thinkingcap flint; do
+is_radiance thinkingcap || fail "thinkingcap radiance preset not detected"
+[[ $RAD_REPO == - ]] || fail "local RAD_REPO=- not read: $RAD_REPO"
+for p in flint; do
   is_radiance "$p" && fail "gguf preset $p matched"
 done
 [[ -z $RAD && -z $RAD_REPO ]] || fail "non-radiance call left RAD=$RAD RAD_REPO=$RAD_REPO"
@@ -51,4 +53,7 @@ out=$(set -e; hf_fetch gemma4-heretic 2>&1); rc=$?
 unset 'PRESET[g2]'
 out=$(set -e; hf_fetch gemma4-heretic 2>&1) || fail "clash check failed a clean preset: $out"
 [[ $out == *fetched* ]] || fail "clean preset not fetched: $out"
+# a locally converted .rad (RAD_REPO=-) has nothing to download
+out=$(set -e; hf_fetch thinkingcap 2>&1) || fail "local .rad failed download: $out"
+[[ $out == *"converted locally"* && $out != *fetched* ]] || fail "local .rad not skipped: $out"
 echo "setup-test ok"

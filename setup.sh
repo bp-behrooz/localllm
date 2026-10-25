@@ -19,10 +19,10 @@ GPUS=(0 1)
 # bash -c with PORT, GPUS and NAME in the environment; it must serve /health
 # and /v1 on PORT. A cmd running serve-radiance.sh is a radiance preset: its
 # .rad file is fetched by `download` from StillDeadcode/<name minus .rad> (or
-# the repo a RAD_REPO=<owner/repo> in the cmd names) into /opt/localllm/models
-# and `remove` deletes it again.
+# the repo a RAD_REPO=<owner/repo> in the cmd names; RAD_REPO=- for one
+# converted locally) into /opt/localllm/models and `remove` deletes it again.
 declare -A PRESET=(
-  [thinkingcap]="2|bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF:Q8_0|-sm tensor --spec-type draft-mtp --spec-draft-n-max 3 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
+  [thinkingcap]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh thinkingcap-qwen3.8-27b-fp8-df2.rad --max-num-seqs 32 --kv-cache-dtype fp8"
   [flint]="1|unsloth/flint-GGUF:UD-Q4_K_XL|-c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20"
   [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-fp8.rad --max-num-seqs 32 --kv-cache-dtype fp8"
   [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-w4a8 MAXLEN=65536 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad --max-num-seqs 8 --kv-cache-dtype fp8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
@@ -72,6 +72,7 @@ hf_fetch() { # <preset>
       fi
     done
     RAD=$rad RAD_REPO=$repo
+    [[ "$RAD_REPO" == - ]] && { echo "skipping $1: $RAD is converted locally (see README)"; return 0; }
     install -d -o localllm -g localllm /opt/localllm/models
     sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
       /opt/localllm/venv/bin/hf download "$RAD_REPO" "$RAD" \
