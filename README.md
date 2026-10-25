@@ -149,7 +149,7 @@ API key.
 
 ## The radiance presets
 
-Two presets run on the
+Three presets run on the
 [radiance](https://codeberg.org/StillDeadcode/radiance) engine — C++/HIP with
 RDNA4 kernels and speculative decoding — each across both GPUs:
 
@@ -158,8 +158,14 @@ RDNA4 kernels and speculative decoding — each across both GPUs:
   stream from a pinned host pool (12 GiB per GPU, so 24 GiB of RAM), and idle
   sessions move to RAM (up to 4 GiB). Sized for 2× 32 GB cards, 96 GB of RAM
   and the 114 GiB model on the `/opt` disk.
-- `qwen3.8-radiance`: Qwen3.8-27B in native MXFP4 (4-bit weights, E4M3
-  activations) with its DFlash2 drafter, 256K context.
+- `qwen3.8-radiance`: Qwen3.8-27B in Qwen's own FP8 (128×128 blocks) with
+  its DFlash2 drafter, 256K context.
+- `gemma4-heretic`: Gemma 4 31B heretic-ara (refusals removed) with a GPTQ
+  int4 trunk, int8 activations and MTP, 64K context at 8 sequences
+  (upstream's flags; 256K fits at `--max-num-seqs 2`).
+
+A preset whose `.rad` isn't in a `StillDeadcode/<name>` repo names its repo
+with `RAD_REPO=<owner/repo>` in the cmd, as `gemma4-heretic` does.
 
 They're `cmd` presets: `setup.sh` installs their launcher
 (`/opt/localllm/serve-radiance.sh <model.rad> [engine flags]`), and the image
@@ -174,7 +180,7 @@ sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman pull docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600
-sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance   # 114 + 19 GiB
+sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
 

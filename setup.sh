@@ -18,18 +18,14 @@ GPUS=(0 1)
 # Custom engine form: "gpus|cmd|<command>". The pool runs the command via
 # bash -c with PORT, GPUS and NAME in the environment; it must serve /health
 # and /v1 on PORT. A cmd running serve-radiance.sh is a radiance preset: its
-# .rad file is fetched by `download` from StillDeadcode/<name minus .rad> into
-# /opt/localllm/models and `remove` deletes it again.
+# .rad file is fetched by `download` from StillDeadcode/<name minus .rad> (or
+# the repo a RAD_REPO=<owner/repo> in the cmd names) into /opt/localllm/models
+# and `remove` deletes it again.
 declare -A PRESET=(
-  [thinkingcap]="1|bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF:Q4_K_M|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20"
-  [qwen3.8]="1|unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
-  [qwen3.8-fast]="1|ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:IQ3_S-mtp|--spec-type draft-mtp --spec-draft-n-max 4 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
-  [tiel-coder]="1|peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP:UD-Q4_K_XL|--spec-type draft-mtp --spec-draft-n-max 4 -c 131072 -ctk q8_0 -ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20"
-  [qwen3-coder]="1|unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:UD-Q4_K_XL|-c 262144 -ctk q8_0 -ctv q8_0 --temp 0.7 --top-p 0.8 --top-k 20 --repeat-penalty 1.05"
-  [gpt-oss-20b]="1|ggml-org/gpt-oss-20b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
-  [muse-glimmer]="1|unsloth/Muse-Glimmer-30B-GGUF:UD-Q4_K_XL|-c 131072 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64"
-  [gpt-oss-120b]="2|ggml-org/gpt-oss-120b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
-  [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-mxfp4.rad --max-num-seqs 32 --kv-cache-dtype fp8"
+  [thinkingcap]="2|bottlecapai/ThinkingCap-Qwen3.8-27B-GGUF:Q8_0|-sm tensor --spec-type draft-mtp --spec-draft-n-max 3 -c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0"
+  [flint]="1|unsloth/flint-GGUF:UD-Q4_K_XL|-c 262144 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 20"
+  [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-fp8.rad --max-num-seqs 32 --kv-cache-dtype fp8"
+  [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-w4a8 MAXLEN=65536 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad --max-num-seqs 8 --kv-cache-dtype fp8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
   [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
 )
 
@@ -48,11 +44,12 @@ usage() {
 
 # Radiance presets are cmd presets running serve-radiance.sh with exactly one
 # .rad file, served from /opt/localllm/models; that file is the whole download
-# to fetch, and its name (minus .rad) is the StillDeadcode repo holding it.
-RAD=  # out: the .rad name, set by is_radiance
-is_radiance() { # <preset>: 0 = radiance (sets RAD), 1 = not one; dies on an ambiguous cmd
+# to fetch, from the HF repo RAD_REPO=<owner/repo> in the cmd names, else the
+# StillDeadcode repo named after the file (minus .rad).
+RAD= RAD_REPO=  # out: the .rad name and its HF repo, set by is_radiance
+is_radiance() { # <preset>: 0 = radiance (sets RAD, RAD_REPO), 1 = not one; dies on an ambiguous cmd
   local m cmd
-  RAD=
+  RAD= RAD_REPO=
   IFS='|' read -r _ m cmd <<<"${PRESET[$1]}"
   [[ "$m" == cmd && "$cmd" == *serve-radiance.sh* ]] || return 1
   RAD=$(grep -oE '[^ /]+\.rad\b' <<<"$cmd" | sort -u || true)
@@ -60,13 +57,24 @@ is_radiance() { # <preset>: 0 = radiance (sets RAD), 1 = not one; dies on an amb
   [[ "$RAD" != *$'\n'* ]] \
     || { echo "$1: its cmd names more than one .rad; download/remove can't pick one" >&2
          exit 1; }
+  RAD_REPO=$(sed -nE 's/^(.*[[:space:]])?RAD_REPO=([^[:space:]]+).*/\2/p' <<<"$cmd")
+  RAD_REPO=${RAD_REPO:-StillDeadcode/${RAD%.rad}}
 }
 
 hf_fetch() { # <preset>
   if is_radiance "$1"; then
+    # .rads land flat by file name, so two repos can't share one name
+    local p rad=$RAD repo=$RAD_REPO
+    for p in "${!PRESET[@]}"; do
+      if [[ "$p" != "$1" ]] && is_radiance "$p" && [[ "$RAD" == "$rad" && "$RAD_REPO" != "$repo" ]]; then
+        echo "$1 and $p both name $rad, from $repo and $RAD_REPO; rename one" >&2
+        exit 1
+      fi
+    done
+    RAD=$rad RAD_REPO=$repo
     install -d -o localllm -g localllm /opt/localllm/models
     sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
-      /opt/localllm/venv/bin/hf download "StillDeadcode/${RAD%.rad}" "$RAD" \
+      /opt/localllm/venv/bin/hf download "$RAD_REPO" "$RAD" \
       --local-dir /opt/localllm/models
     return
   fi

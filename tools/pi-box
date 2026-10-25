@@ -41,7 +41,7 @@
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
-#   PI_BOX_DEFAULT      default provider/model, e.g. "local/qwen3-coder" or
+#   PI_BOX_DEFAULT      default provider/model, e.g. "local/flint" or
 #                       "opencode-go/minimax-m2.7". Without it, --sync points the
 #                       default at the first model the server reports (the pool
 #                       lists its preloaded presets first), overwriting a model
