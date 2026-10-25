@@ -30,7 +30,7 @@ declare -A PRESET=(
   [muse-glimmer]="1|unsloth/Muse-Glimmer-30B-GGUF:UD-Q4_K_XL|-c 131072 -ctk q8_0 -ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64"
   [gpt-oss-120b]="2|ggml-org/gpt-oss-120b-GGUF|-c 131072 --temp 1.0 --top-p 1.0"
   [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-mxfp4.rad --max-num-seqs 32 --kv-cache-dtype fp8"
-  [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /data/kvcache/flashnext --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
+  [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
 )
 
 # preloaded by the pool at startup (space-separated preset names)
@@ -155,8 +155,7 @@ remove)
     done
     rm -f "/opt/localllm/models/$RAD"
     echo "removed $2's /opt/localllm/models/$RAD"
-    echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed),"
-    echo "and its cache dir under /opt/localllm/radiance-state (see --prefix-cache-dir)"
+    echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed)"
     exit 0
   fi
   [[ "$m" == cmd ]] && { echo "$2 is a custom engine; remove its files where it keeps them"; exit 1; }

@@ -156,10 +156,8 @@ RDNA4 kernels and speculative decoding — each across both GPUs:
 - `qwen3.8-flash-next` (preloaded): Qwen3.8-Flash-Next, an MoE with an int8
   trunk and 4-bit experts, 256K context. The experts that don't fit VRAM
   stream from a pinned host pool (12 GiB per GPU, so 24 GiB of RAM), and idle
-  sessions move to RAM and then to disk (up to 128 GiB under
-  `/opt/localllm/radiance-state`). Sized for 2× 32 GB cards, 96 GB of RAM and
-  ~300 GiB free on the `/opt` disk (114 GiB model + up to 128 GiB disk cache,
-  plus room for the rest).
+  sessions move to RAM (up to 4 GiB). Sized for 2× 32 GB cards, 96 GB of RAM
+  and the 114 GiB model on the `/opt` disk.
 - `qwen3.8-radiance`: Qwen3.8-27B in native MXFP4 (4-bit weights, E4M3
   activations) with its DFlash2 drafter, 256K context.
 
@@ -175,13 +173,18 @@ sudo pacman -S podman crun
 sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull stilldeadcode/radiance
+  podman pull docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance   # 114 + 19 GiB
 sudo systemctl restart localllm
 ```
 
-Skip a model you don't want, and delete its preset from the table (and
-`PRELOAD`). Coming from
+The image is pinned by digest in `serve-radiance.sh` (currently 1.12.0), since
+radiance releases rename and drop engine flags; upgrade by changing that pin
+and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
+driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,
+but without GPU virtual memory, so Flash-Next's KV cache can't lend VRAM to
+the experts. Skip a model you don't want, and delete its
+preset from the table (and `PRELOAD`). Coming from
 the old docker setup: after the steps above (which also drop `localllm` from
 the `docker` group and re-own the root-owned caches), free the old image with
 `sudo docker system prune -a`, and if nothing else on the box needs it,

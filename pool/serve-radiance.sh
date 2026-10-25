@@ -4,19 +4,20 @@
 # serves /opt/localllm/models/<model.rad> on the GPUs the pool assigned.
 # The pool sets PORT, GPUS (HIP indices) and NAME, and stops the container
 # by NAME; MAXLEN is the context, also what the pool advertises. One-time, as
-# localllm: podman pull stilldeadcode/radiance; ./setup.sh download fetches the .rad.
+# localllm: ./setup.sh download fetches the .rad; the pinned image (IMAGE
+# below) is pulled on first start if missing.
 set -euo pipefail
 : "${PORT:?}" "${NAME:?}" "${GPUS:?}" "${MAXLEN:?}" "${1:?usage: $0 <model.rad> [flags...]}"
 model=$1
 shift
 MODEL_DIR=/opt/localllm/models
-STATE_DIR=/opt/localllm/radiance-state
-IMAGE=${RADIANCE_IMAGE:-stilldeadcode/radiance}
+# pinned by digest (1.12.0): presets pass engine flags that releases rename
+# or drop, so bump this together with them
+IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600}
 [ -f "$MODEL_DIR/$model" ] || {
   echo "missing $MODEL_DIR/$model; fetch it with: sudo ./setup.sh download <this preset>" >&2
   exit 1
 }
-mkdir -p "$STATE_DIR"
 podman image exists "$IMAGE" 2>/dev/null || podman pull "$IMAGE"
 tp=$(tr ',' '\n' <<<"$GPUS" | wc -l)
 exec podman run --replace --name "$NAME" \
@@ -27,7 +28,6 @@ exec podman run --replace --name "$NAME" \
   --ulimit memlock=-1 \
   --init \
   -v "$MODEL_DIR":/models:ro \
-  -v "$STATE_DIR":/data \
   -e HIP_VISIBLE_DEVICES="$GPUS" \
   "$IMAGE" \
   --model "/models/$model" \
