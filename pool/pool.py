@@ -51,6 +51,7 @@ REAP_INTERVAL = 30  # how often the reaper looks for idle instances
 
 @asynccontextmanager
 async def _lifespan(_app):
+    await asyncio.to_thread(_rm_orphans)
     if PRELOAD:
         asyncio.create_task(preload_all())
     reaper_task = asyncio.create_task(reaper())
@@ -236,8 +237,40 @@ class Instance:
                 self.proc.wait()
 
 
+def _rm_containers(names):
+    """Force-remove containers, gone or not: a launcher that died, or an
+    earlier pool, can leave one running on its GPUs and port."""
+    if not names:
+        return
+    try:
+        subprocess.run(["podman", "rm", "-f", "-i", *names],
+                       stdout=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[pool] podman rm {' '.join(names)}: {e}", file=sys.stderr)
+
+
+def _rm_orphans():
+    """Before anything loads, every pool-* container is an earlier pool's:
+    conmon can outlive a restart of the service."""
+    try:
+        r = subprocess.run(["podman", "ps", "-a", "--filter", "name=^pool-",
+                            "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[pool] podman ps: {e}", file=sys.stderr)
+        return
+    orphans = r.stdout.split()
+    if orphans:
+        print(f"[pool] removing orphaned containers: {' '.join(orphans)}", file=sys.stderr)
+        _rm_containers(orphans)
+
+
 def _alive(name):
-    live = [i for i in instances.get(name, []) if i.proc.poll() is None]
+    live, dead = [], []
+    for i in instances.get(name, []):
+        (live if i.proc.poll() is None else dead).append(i)
+    # the launcher is gone, but conmon may still run its container
+    _rm_containers([i.container for i in dead])
     if live:
         instances[name] = live
     else:
@@ -490,7 +523,13 @@ def selftest():
         return FakeProc()
     subprocess.Popen = fake_popen
     ran = []
-    subprocess.run = lambda cmd, **kw: ran.append(cmd)
+    orphans = []  # what the fake `podman ps` lists
+    class FakeRun:
+        def __init__(self, cmd): self.stdout = "\n".join(orphans) if "ps" in cmd else ""
+    def fake_run(cmd, **kw):
+        ran.append(cmd)
+        return FakeRun(cmd)
+    subprocess.run = fake_run
     async def instantly_ready(self): pass
     Instance._wait_ready = instantly_ready
 
@@ -526,10 +565,13 @@ def selftest():
         assert await acquire("a") is None
         big.inflight = 0
 
-        # 6. crashed instance is pruned and respawned on next request
+        # 6. crashed instance is pruned and respawned on next request, and
+        #    its container, which conmon may keep running, is removed
         big.proc.returncode = 1
+        ran.clear()
         await acquire("big")
         assert names() == {"big": 1} and instances["big"][0] is not big
+        assert ran == [["podman", "rm", "-f", "-i", big.container]], ran
 
         # 7. failed load raises and leaves no half-dead instance behind
         async def load_fails(self):
@@ -556,13 +598,23 @@ def selftest():
         _drop(rad)
         assert ran == [["podman", "stop", "-i", "-t", "30", env["NAME"]]], ran
 
-        # 9. preload: the configured default loads at startup
+        # 9. startup removes what an earlier pool left running, and only that
+        ran.clear()
+        _rm_orphans()
+        assert ran == [["podman", "ps", "-a", "--filter", "name=^pool-",
+                        "--format", "{{.Names}}"]], ran
+        orphans[:] = ["pool-big-8150", "pool-rad-8150"]
+        ran.clear()
+        _rm_orphans()
+        assert ran[-1] == ["podman", "rm", "-f", "-i", "pool-big-8150", "pool-rad-8150"], ran
+
+        # 10. preload: the configured default loads at startup
         global PRELOAD
         PRELOAD = ["a"]
         await preload_all()
         assert "a" in instances
 
-        # 10. HTTP layer: auth, model info, unknown model, busy pool,
+        # 11. HTTP layer: auth, model info, unknown model, busy pool,
         #    upstream down + bookkeeping
         api = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                 base_url="http://t",
@@ -605,7 +657,7 @@ def selftest():
         await api.aclose()
         await anon.aclose()
 
-        # 11. idle reaping: per-kind TTLs, busy and loading instances spared
+        # 12. idle reaping: per-kind TTLs, busy and loading instances spared
         global IDLE_TTL, IDLE_TTL_CMD, REAP_INTERVAL
         IDLE_TTL, IDLE_TTL_CMD = 100, 1000
         for lst in list(instances.values()):
@@ -682,7 +734,7 @@ def selftest():
         recheck()
         assert api_keys() == {}
 
-        # 12. load_config: env > pool.json > default; without any key it
+        # 13. load_config: env > pool.json > default; without any key it
         # refuses to start rather than answer every request with a 401
         cfg_path = os.path.join(HERE, "pool.json")
         with open(cfg_path, "w") as f:
@@ -703,7 +755,7 @@ def selftest():
         os.environ.pop("KEYS_RECHECK")
         os.remove(cfg_path)
 
-        # 13. POWER_CAP_W: written to every card's power1_cap, in uW
+        # 14. POWER_CAP_W: written to every card's power1_cap, in uW
         capf = os.path.join(work, "power1_cap")
         real_glob = glob.glob
         glob.glob = lambda p: [capf]
