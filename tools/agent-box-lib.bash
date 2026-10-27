@@ -20,6 +20,9 @@
 #   BOX_KEEP         paths under BOX_HOME that `--clean` preserves, relative
 #                    (e.g. (.claude) — the logins and settings, not the runtimes)
 #   BOX_CAN_SYNC     optional: 1 if the box adds --sync / --sync-only (default 0)
+#   BOX_NPM_PKG      optional: the agent's npm package, and BOX_NPM_TAG the
+#                    version or tag it installs; a launch then warns when the
+#                    image is behind what the tag points to now
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
 # everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
@@ -457,6 +460,7 @@ box_build_image() {
   if [[ $rc -eq 0 ]]; then
     mkdir -p "$(dirname "$(_box_custom_stamp)")"
     _box_dockerfile_custom | cksum >"$(_box_custom_stamp)"
+    [[ -z ${BOX_NPM_PKG-} ]] || _box_image_version >"$(_box_version_stamp)"
   fi
   return "$rc"
 }
@@ -466,6 +470,55 @@ _box_custom_changed() {
   local built
   built="$(cat "$(_box_custom_stamp)" 2>/dev/null || printf '' | cksum)"
   [[ "$(_box_dockerfile_custom | cksum)" != "$built" ]]
+}
+
+# The agent version in the image, read once per build and kept here, so a
+# launch doesn't have to start a container to know it. Empty if npm didn't say.
+_box_version_stamp() {
+  printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/$BOX_IMAGE.version"
+}
+
+_box_image_version() {
+  "${BOX_CTR[@]}" run --rm --entrypoint npm "$BOX_IMAGE" ls -g --depth=0 "$BOX_NPM_PKG" 2>/dev/null |
+    sed -n "s|.*$BOX_NPM_PKG@\([^ ]*\).*|\1|p" | head -1 || true
+}
+
+# What the registry has under BOX_NPM_TAG, as of the last lookup (empty if
+# none worked). Every box image of this agent shares it.
+_box_npm_cache() {
+  printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/npm-$(printf '%s' "$BOX_NPM_PKG@$BOX_NPM_TAG" | tr / _)"
+}
+
+# Looks it up again, at most once a day (failures included, so being offline
+# costs nothing).
+_box_npm_refresh() {
+  local cache v
+  cache="$(_box_npm_cache)"
+  [[ -z $(find "$cache" -mmin -1440 2>/dev/null) ]] || return 0
+  touch "$cache"
+  v="$(curl -fsS --max-time 10 "https://registry.npmjs.org/$BOX_NPM_PKG/$BOX_NPM_TAG" 2>/dev/null |
+    grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)" || true
+  [[ -z $v ]] || printf '%s\n' "$v" >"$cache"
+}
+
+# Warn when the image's agent isn't what BOX_NPM_TAG now points to.
+# Nothing else notices a new release, and a profile's image only rebuilds with
+# its own --profile, so it can fall far behind. The lookup runs in the
+# background, so this launch compares against the previous one's answer.
+_box_check_version() {
+  [[ -n ${BOX_NPM_PKG-} ]] || return 0
+  local stamp have want profile
+  stamp="$(_box_version_stamp)"
+  mkdir -p "$(dirname "$stamp")"
+  # an image built before this check: ask it once
+  [[ -f $stamp ]] || _box_image_version >"$stamp"
+  (_box_npm_refresh) </dev/null >/dev/null 2>&1 &
+  have="$(cat "$stamp")"
+  want="$(cat "$(_box_npm_cache)" 2>/dev/null || true)"
+  [[ -n $have && -n $want && $have != "$want" ]] || return 0
+  profile="$(box_knob PROFILE)"
+  echo "==> $BOX_IMAGE has $BOX_NPM_PKG $have, $BOX_NPM_TAG is $want;" \
+    "update with: ${0##*/}${profile:+ --profile=$profile} --rebuild" >&2
 }
 
 # box_ensure_image $REBUILD $BUILD_ONLY [note]
@@ -481,6 +534,9 @@ box_ensure_image() {
     echo "==> your Dockerfile additions changed" >&2
     box_build_image "$note"
   fi
+  # Not after --rebuild, which just installed the newest. Other builds reuse a
+  # cached npm layer, so they can still be behind.
+  [[ $rebuild -eq 1 ]] || _box_check_version
 }
 
 # ----------------------------------------------------------------- clean -----

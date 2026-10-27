@@ -61,6 +61,16 @@ run_lacks() {
 call_has() { grep -qF -- "$1" "$FAKE_DIR/calls"; }
 call_lacks() { ! grep -qF -- "$1" "$FAKE_DIR/calls"; }
 
+# wait_for_file PATH: until a background job has written PATH (up to 5s).
+wait_for_file() {
+  local i
+  for ((i = 0; i < 50; i++)); do
+    [[ -s $1 ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 git_q() { git -c user.name=t -c user.email=t@example.com "$@" -q; }
 
 # A repo at $1 with one commit.

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stands in for curl, so no test reaches the network: the npm registry answers
+# with $FAKE_NPM_VERSION, everything else fails.
+echo "curl $*" >>"$FAKE_DIR/calls"
+[[ $* == *registry.npmjs.org* && -n ${FAKE_NPM_VERSION-} ]] || exit 22
+echo "{\"name\":\"x\",\"version\":\"$FAKE_NPM_VERSION\"}"

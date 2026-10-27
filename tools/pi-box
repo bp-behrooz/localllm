@@ -72,6 +72,8 @@ BOX_ENV_PREFIX="PI_BOX"
 BOX_CAN_SYNC=1
 
 PI_VERSION="${PI_BOX_VERSION:-latest}"
+BOX_NPM_PKG="@earendil-works/pi-coding-agent"
+BOX_NPM_TAG="$PI_VERSION"
 PI_BOX_HOME="${PI_BOX_HOME:-$HOME/.pi-box}"
 PI_AGENT_HOME="$PI_BOX_HOME/.pi/agent"   # pi reads it as /root/.pi/agent
 BOX_HOME="$PI_BOX_HOME"

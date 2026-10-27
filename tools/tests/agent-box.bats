@@ -243,6 +243,36 @@ wsl_note() {
   [[ $status -ne 0 && $output == *"not rootless"* ]]
 }
 
+# ---------------------------------------------------------------- version ----
+# The registry lookup runs in the background and feeds the next launch, so
+# each test launches twice.
+@test "version: warns when a profile's image is behind, naming the profile" {
+  export CL_BOX_RUNTIME=crun FAKE_AGENT_VERSION=2.1.0 FAKE_NPM_VERSION=2.1.5
+  echo 'RUN true' >"$HOME/.box.data.dockerfile"
+  touch "$HOME/.box.data.env"
+  run_box --profile=data --shell -c true
+  wait_for_file "$XDG_STATE_HOME/agent-box/npm-@anthropic-ai_claude-code@latest"
+  run_box --profile=data --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $output == *"claude-box-data has @anthropic-ai/claude-code 2.1.0, latest is 2.1.5"* ]]
+  [[ $output == *"claude-box --profile=data --rebuild"* ]]
+}
+
+@test "version: quiet when current, offline, or right after --rebuild" {
+  export CL_BOX_RUNTIME=crun FAKE_AGENT_VERSION=2.1.5 FAKE_NPM_VERSION=2.1.5
+  run_box --shell -c true
+  wait_for_file "$XDG_STATE_HOME/agent-box/npm-@anthropic-ai_claude-code@latest"
+  run_box --shell -c true
+  [[ $status -eq 0 && $output != *"--rebuild"* ]]
+  rm -rf "$XDG_STATE_HOME/agent-box"
+  unset FAKE_NPM_VERSION
+  run_box --shell -c true
+  run_box --shell -c true
+  [[ $status -eq 0 && $output != *"--rebuild"* ]]
+  FAKE_AGENT_VERSION=2.1.0 FAKE_NPM_VERSION=2.1.5 run_box --rebuild --build-only
+  [[ $status -eq 0 && $output != *"has @anthropic-ai"* ]]
+}
+
 # ------------------------------------------------------------------ clean ----
 # --clean-all and --clean-data ask on the tty, so these use --clean: same code
 # path, no answer needed.

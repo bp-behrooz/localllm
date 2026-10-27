@@ -69,6 +69,8 @@ BOX_NAME_PREFIX="cl"
 BOX_ENV_PREFIX="CL_BOX"
 
 CL_VERSION="${CL_BOX_VERSION:-latest}"
+BOX_NPM_PKG="@anthropic-ai/claude-code"
+BOX_NPM_TAG="$CL_VERSION"
 CL_BOX_HOME="${CL_BOX_HOME:-$HOME/.claude-box}"
 BOX_HOME="$CL_BOX_HOME"
 BOX_KEEP=(.claude)

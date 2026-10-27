@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Stands in for podman: answers what the boxes ask, and records `run`'s
 # arguments one per line in $FAKE_DIR/run.args.
+# The version check's `npm ls` gets $FAKE_AGENT_VERSION, and isn't recorded.
+if [[ $1 == run && $* == *"--entrypoint npm"* ]]; then
+  [[ -z ${FAKE_AGENT_VERSION-} ]] || echo "\`-- ${*: -1}@$FAKE_AGENT_VERSION"
+  exit 0
+fi
 echo "podman $*" >>"$FAKE_DIR/calls"
 case $1 in
 info) echo "${FAKE_ROOTLESS:-true}" ;;

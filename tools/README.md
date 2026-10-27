@@ -219,6 +219,10 @@ server. Everything else goes to the agent.
   `export FOO=bar`) into the box. `~/.box.default.env` is always read if it
   exists, with `NAME` on top. Profiles are shared by every box and kept out of
   the box home, so the agent can't read or change them.
+- `--rebuild` rebuilds only the image you launch, so with a profile that has
+  its own Dockerfile, pass `--profile` too. A launch warns when the image's
+  agent is behind npm (checked in the background, at most once a day; not
+  agy-box).
 - `--shell` runs bash instead of the agent, same everything else:
   `pi-box --shell -c 'uname -a'`.
 - `--clean` drops runtimes and caches but keeps the login; `--clean-all`

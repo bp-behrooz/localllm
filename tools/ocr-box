@@ -70,6 +70,8 @@ BOX_ENV_PREFIX="OCR_BOX"
 BOX_CAN_SYNC=1
 
 OCR_VERSION="${OCR_BOX_VERSION:-latest}"
+BOX_NPM_PKG="@alibaba-group/open-code-review"
+BOX_NPM_TAG="$OCR_VERSION"
 OCR_BOX_HOME="${OCR_BOX_HOME:-$HOME/.ocr-box}"
 OCR_CONFIG="$OCR_BOX_HOME/.opencodereview/config.json"
 BOX_HOME="$OCR_BOX_HOME"
