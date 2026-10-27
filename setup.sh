@@ -25,6 +25,7 @@ declare -A PRESET=(
   [thinkingcap]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh thinkingcap-qwen3.8-27b-fp8-df2.rad --max-num-seqs 32 --kv-cache-dtype fp8"
   [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-fp8.rad --max-num-seqs 32 --kv-cache-dtype fp8"
   [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-w4a8 MAXLEN=65536 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad --max-num-seqs 8 --kv-cache-dtype fp8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
+  [nanbeige4.3]="2|bartowski/Nanbeige_Nanbeige4.3-33B-GGUF:Q5_K_M|-sm tensor -c 262144 -ctk q8_0 -ctv q8_0 --temp 0.6 --top-p 0.95"
   [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
 )
 

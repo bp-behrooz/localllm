@@ -150,6 +150,20 @@ example.com {
 Clients then use base URL `https://example.com/localllm/v1` with their key as
 API key.
 
+## nanbeige4.3
+
+Nanbeige4.3-33B (a plain Llama-shaped dense model) as bartowski's Q5_K_M
+GGUF on llama-server, split across both GPUs with `-sm tensor`, at 256K
+context with a q8_0 KV cache: about 32 tok/s. Sized for 2× 32 GB: ~23 GiB
+of weights plus ~28 GiB of KV at 256K (about 110 KiB a token). Q6_K_L fits
+at `-c 196608`; `-c 524288`, the model's maximum, doesn't fit at all.
+
+It runs without ProCreations' DFlash2 drafter. Converted to a GGUF, the
+drafter crashes llama.cpp under `-sm tensor`
+([#28777](https://github.com/ggml-org/llama.cpp/issues/28777),
+[#27833](https://github.com/ggml-org/llama.cpp/issues/27833)), and under
+`-sm layer` it accepted 11% of its drafts, for 19 tok/s.
+
 ## The radiance presets
 
 Four presets run on the
