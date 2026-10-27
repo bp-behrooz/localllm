@@ -47,7 +47,7 @@
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
 #   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
-#   OC_BOX_DEFAULT      model a sync makes the current one, e.g. "localllm/flint"
+#   OC_BOX_DEFAULT      model a sync makes the current one, e.g. "localllm/<preset>"
 #                       or "opencode-go/minimax-m2.7" (default localllm/<first synced
 #                       model>, i.e. the server's preloaded one); switching models in
 #                       opencode sticks until the next sync

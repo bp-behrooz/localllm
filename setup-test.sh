@@ -16,12 +16,9 @@ is_radiance gemma4-heretic || fail "gemma4-heretic radiance preset not detected"
 [[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-w4a8 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
 is_radiance thinkingcap || fail "thinkingcap radiance preset not detected"
 [[ $RAD_REPO == - ]] || fail "local RAD_REPO=- not read: $RAD_REPO"
-for p in flint; do
-  is_radiance "$p" && fail "gguf preset $p matched"
-done
-[[ -z $RAD && -z $RAD_REPO ]] || fail "non-radiance call left RAD=$RAD RAD_REPO=$RAD_REPO"
 
 PRESET+=(
+  [g]="1|org/x-GGUF:Q4_K_M|-c 4096"
   [c]="1|cmd|./other-engine.sh"
   [o]="1|cmd|serve.sh a.rad --drafter b.rad"
   [t]="2|cmd|serve-radiance.sh a.rad --drafter b.rad"
@@ -30,6 +27,8 @@ PRESET+=(
   [x]="2|cmd|serve-radiance.sh model.radix"
   [r]="2|cmd|MAXLEN=1 serve-radiance.sh x.rad --lora-dir NOT_RAD_REPO=a/b"
 )
+is_radiance g && fail "gguf preset matched"
+[[ -z $RAD && -z $RAD_REPO ]] || fail "non-radiance call left RAD=$RAD RAD_REPO=$RAD_REPO"
 is_radiance c && fail "non-radiance cmd preset matched"
 [[ -z $RAD ]] || fail "non-radiance call left RAD=$RAD"
 is_radiance o && fail "foreign .rad tokens matched a non-radiance cmd"
