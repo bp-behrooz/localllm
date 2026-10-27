@@ -76,6 +76,7 @@ BOX_NPM_PKG="@earendil-works/pi-coding-agent"
 BOX_NPM_TAG="$PI_VERSION"
 PI_BOX_HOME="${PI_BOX_HOME:-$HOME/.pi-box}"
 PI_AGENT_HOME="$PI_BOX_HOME/.pi/agent"   # pi reads it as /root/.pi/agent
+PI_PACKAGES=/opt/pi-packages/node_modules  # in the image, see box_dockerfile_agent
 BOX_HOME="$PI_BOX_HOME"
 BOX_KEEP=(.pi)
 
@@ -106,6 +107,13 @@ box_dockerfile_agent() {
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \\
  && npm cache clean --force
 
+# pi's packages, listed in settings.json as local paths so pi never checks them
+# for updates. No peers: pi hands its own APIs to the extensions it loads.
+RUN npm install --prefix ${PI_PACKAGES%/node_modules} --omit=dev --legacy-peer-deps \\
+      @dietrichgebert/ponytail pi-hide-providers @tavily/pi-extension \\
+ && npm cache clean --force
+LABEL pi-box.packages=1
+
 ENTRYPOINT ["pi"]
 EOF
 }
@@ -119,7 +127,8 @@ sync_models() {
   : "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY}"
   mkdir -p "$PI_AGENT_HOME/sessions"
 
-  PI_AGENT_HOME="$PI_AGENT_HOME" PI_BOX_DEFAULT="${PI_BOX_DEFAULT:-}" python3 - <<'PYEOF'
+  PI_AGENT_HOME="$PI_AGENT_HOME" PI_PACKAGES="$PI_PACKAGES" PI_BOX_DEFAULT="${PI_BOX_DEFAULT:-}" \
+    python3 - <<'PYEOF'
 import json, os, sys, urllib.request
 from pathlib import Path
 
@@ -163,7 +172,7 @@ spath = home / "settings.json"
 # Seed ponytail only on first run; if the user removes it from the settings,
 # we leave it out.
 settings = json.loads(spath.read_text()) if spath.is_file() else {
-    "packages": ["git:github.com/DietrichGebert/ponytail"]}
+    "packages": [os.environ["PI_PACKAGES"] + "/@dietrichgebert/ponytail"]}
 # Default model: PI_BOX_DEFAULT, else the first model the server reports — the
 # pool lists its preloaded presets first, so that is the preset that answers
 # without a cold start. pi silently ignores a default it can't find in
@@ -189,7 +198,7 @@ ensure_settings() {
   # manages @tavily/pi-extension based on whether --search was passed, and
   # writes the hide rules from PI_BOX_HIDE. Does not touch models.
   mkdir -p "$PI_AGENT_HOME"
-  PI_AGENT_HOME="$PI_AGENT_HOME" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" \
+  PI_AGENT_HOME="$PI_AGENT_HOME" PI_PACKAGES="$PI_PACKAGES" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" \
     PI_BOX_SEARCH="$(box_knob SEARCH)" python3 - <<'PYEOF'
 import json, os
 from pathlib import Path
@@ -199,16 +208,29 @@ home = Path(os.environ["PI_AGENT_HOME"])
 spath = home / "settings.json"
 settings = json.loads(spath.read_text()) if spath.is_file() else {}
 before = json.dumps(settings, sort_keys=True)
-pkgs = settings.setdefault("packages", [])
+
+# The packages baked into the image. Older homes list them as npm: or git:
+# sources, which pi would check for updates; point those at the image's copy.
+baked = {k: os.environ["PI_PACKAGES"] + "/" + v for k, v in {
+    "ponytail": "@dietrichgebert/ponytail",
+    "pi-hide-providers": "pi-hide-providers",
+    "@tavily/pi-extension": "@tavily/pi-extension"}.items()}
+def local(p):
+    if isinstance(p, str):
+        for key, path in baked.items():
+            if key in p:
+                return path
+    return p
+pkgs = settings["packages"] = [local(p) for p in settings.get("packages", [])]
 
 if not any(isinstance(p, str) and "pi-hide-providers" in p for p in pkgs):
-    pkgs.append("npm:pi-hide-providers")
+    pkgs.append(baked["pi-hide-providers"])
 
 search_enabled = bool(os.environ.get("PI_BOX_SEARCH"))
 has_tavily = any(isinstance(p, str) and "@tavily/pi-extension" in p for p in pkgs)
 
 if search_enabled and not has_tavily:
-    pkgs.append("npm:@tavily/pi-extension")
+    pkgs.append(baked["@tavily/pi-extension"])
 elif not search_enabled and has_tavily:
     settings["packages"] = [p for p in pkgs if not (isinstance(p, str) and "@tavily/pi-extension" in p)]
 
@@ -234,6 +256,11 @@ fi
 
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "pi@$PI_VERSION"
+# settings.json points at the packages in the image; an older one has none.
+if [[ $(_box_image_label pi-box.packages) -lt 1 ]]; then
+  echo "==> $BOX_IMAGE predates the baked-in pi packages" >&2
+  box_build_image "pi@$PI_VERSION"
+fi
 
 if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
@@ -260,9 +287,12 @@ if [[ -n "$(box_knob SEARCH)" ]]; then
   BOX_SEARCH_ENV=(--env TAVILY_API_KEY)
 fi
 
+# PI_OFFLINE: no telemetry, version or package update checks, or catalog
+# refresh. Everything pi needs is in the image.
 box_run "${BOX_RUN_ARGS[@]}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   ${BOX_SEARCH_ENV[@]+"${BOX_SEARCH_ENV[@]}"} \
+  --env PI_OFFLINE=1 \
   --env PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION \
   "$BOX_IMAGE" "$@"

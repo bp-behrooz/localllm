@@ -830,15 +830,21 @@ _box_data_prefix() {
   printf 'agentbox-%s-%s-' "$(box_knob PROFILE default)" "$proj"
 }
 
-# The image's agent-box.entry label, from either runtime.
-_box_entry_version() {
+# A numeric label of the image, from either runtime; 0 when it has none.
+_box_image_label() {
+  local val
   if [[ ${BOX_CTR[0]} == podman ]]; then
-    podman image inspect --format '{{index .Config.Labels "agent-box.entry"}}' "$BOX_IMAGE"
+    val="$(podman image inspect --format "{{index .Config.Labels \"$1\"}}" "$BOX_IMAGE")"
   else
-    container image inspect "$BOX_IMAGE" |
-      sed -n 's/.*"agent-box.entry" *: *"\([0-9]*\)".*/\1/p' | head -1
+    val="$(container image inspect "$BOX_IMAGE" |
+      sed -n "s/.*\"$1\" *: *\"\([0-9]*\)\".*/\1/p" | head -1)"
   fi
+  [[ $val =~ ^[0-9]+$ ]] || val=0
+  printf '%s' "$val"
 }
+
+# The image's agent-box.entry label.
+_box_entry_version() { _box_image_label agent-box.entry; }
 
 # One box per volume set: two databases on one data dir corrupt it. A lock dir
 # holding this script's PID; one left by a box that died is taken over.

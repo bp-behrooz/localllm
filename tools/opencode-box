@@ -295,9 +295,15 @@ oc_db="$(_box_data_prefix)"
 oc_db="${oc_db%-}.db"
 [[ ${BOX_SHELL:-0} -eq 1 ]] || _box_data_lock "opencode-${oc_db%.db}"
 
+# Quiet: no models.dev catalog fetch (the build ships a snapshot, and sync
+# writes the local models), no update check (the version lives in the image),
+# no LSP server downloads.
 box_run "${BOX_RUN_ARGS[@]}" \
   --env LOCAL_LLM_API_KEY \
   --env OPENCODE_API_KEY \
   --env "OPENCODE_DB=$oc_db" \
+  --env OPENCODE_DISABLE_MODELS_FETCH=1 \
+  --env OPENCODE_DISABLE_AUTOUPDATE=1 \
+  --env OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
   ${BOX_SEARCH_ENV[@]+"${BOX_SEARCH_ENV[@]}"} \
   "$BOX_IMAGE" "$@"

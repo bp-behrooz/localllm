@@ -192,6 +192,7 @@ wsl_note() {
   run_has --runtime crun
   run_has --entrypoint /usr/local/bin/box-entry
   run_has --env ANTHROPIC_CUSTOM_HEADERS
+  run_has --env CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   run_has claude-box bash
   run_has -c true
   run_lacks -t
@@ -364,6 +365,44 @@ json.dump(s, open(p, "w"))'
   [[ $status -ne 0 && $output == *"not served"* ]]
 }
 
+# ----------------------------------------------------------- pi-box quiet ----
+pi_run() {
+  export PI_BOX_HOME="$BATS_TEST_TMPDIR/pi-home" PI_BOX_RUNTIME=crun \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
+  run bash "$TOOLS/pi-box" "$@"
+}
+
+# the packages settings.json lists, one per line
+pi_packages() {
+  python3 -c 'import json,os
+s = json.load(open(os.path.join(os.environ["PI_BOX_HOME"], ".pi/agent/settings.json")))
+print("\n".join(s["packages"]))'
+}
+
+@test "pi quiet: offline, with packages from the image" {
+  llm_serve qwen3-coder
+  pi_run --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --env PI_OFFLINE=1
+  [[ $(pi_packages) == "/opt/pi-packages/node_modules/@dietrichgebert/ponytail
+/opt/pi-packages/node_modules/pi-hide-providers" ]]
+  TAVILY_API_KEY=tv pi_run --search --shell -c true
+  [[ $(pi_packages) == *$'\n'/opt/pi-packages/node_modules/@tavily/pi-extension ]]
+}
+
+@test "pi quiet: an older home's package sources move to the image's copies" {
+  mkdir -p "$BATS_TEST_TMPDIR/pi-home/.pi/agent"
+  echo '{"packages": ["git:github.com/DietrichGebert/ponytail", "npm:pi-hide-providers",
+    "npm:@tavily/pi-extension", "npm:something-else"]}' \
+    >"$BATS_TEST_TMPDIR/pi-home/.pi/agent/settings.json"
+  touch "$BATS_TEST_TMPDIR/pi-home/.pi/agent/models.json"
+  pi_run --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $(pi_packages) == "/opt/pi-packages/node_modules/@dietrichgebert/ponytail
+/opt/pi-packages/node_modules/pi-hide-providers
+npm:something-else" ]]
+}
+
 # --------------------------------------------- opencode-box sync -------------
 # Same file-backed server; the box keeps its own config and its recent-model
 # state under OC_BOX_HOME, which is the container's whole /root.
@@ -510,6 +549,15 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   TAVILY_API_KEY=tv oc_run --shell -c true
   [[ $status -eq 0 && $(oc_websearch) == false ]]
   run_lacks TAVILY_API_KEY
+}
+
+@test "opencode quiet: no catalog fetch, update check or LSP downloads" {
+  llm_serve qwen3-coder
+  oc_run --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --env OPENCODE_DISABLE_MODELS_FETCH=1
+  run_has --env OPENCODE_DISABLE_AUTOUPDATE=1
+  run_has --env OPENCODE_DISABLE_LSP_DOWNLOAD=1
 }
 
 @test "opencode search: --search without a key is refused before anything runs" {

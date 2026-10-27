@@ -165,7 +165,8 @@ ensure_settings
 box_docker_bridge
 
 # Claude's per-project history is keyed by path, and the project is mounted at
-# its Mac path, so it stays separate per project.
+# its Mac path, so it stays separate per project. No telemetry, error reports
+# or update checks: the version lives in the image, and only the API is needed.
 # not exec: the socat trap must outlive claude
 box_run_args
 box_run "${BOX_RUN_ARGS[@]}" \
@@ -175,4 +176,5 @@ box_run "${BOX_RUN_ARGS[@]}" \
   --env ANTHROPIC_CUSTOM_HEADERS \
   --env ANTHROPIC_MODEL \
   --env IS_SANDBOX=1 \
+  --env CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   "$BOX_IMAGE" "$@"

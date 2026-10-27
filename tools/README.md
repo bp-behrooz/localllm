@@ -254,6 +254,23 @@ home's config, models and sessions. `--shell` and subcommands like
 `opencode-box session list` are passed through untouched; `--server` is refused,
 since that server lives behind the VM's loopback.
 
+## Network chatter
+
+Each box turns off what its agent does online besides talking to the model:
+telemetry, update checks (the version lives in the image) and catalog fetches.
+
+| box | sets |
+|---|---|
+| `claude-box` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` |
+| `agy-box` | `AGY_CLI_DISABLE_AUTO_UPDATE=true`; telemetry is an account setting, turn it off in `/config` |
+| `pi-box` | `PI_OFFLINE=1`; its packages are baked into the image (see below) |
+| `opencode-box` | `OPENCODE_DISABLE_MODELS_FETCH=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_LSP_DOWNLOAD=1` |
+| `ocr-box` | `OCR_NO_UPDATE=1` |
+
+pi's packages live in the image under `/opt/pi-packages` and load as local
+paths. Model catalogs come with the pi and opencode builds, so `--rebuild`
+brings new packages, models and agent versions together.
+
 ## Resuming a session
 
 Agents print resume hints like `pi --session <id>` or `claude --resume <id>`.

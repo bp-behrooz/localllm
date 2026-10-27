@@ -37,6 +37,10 @@
 # Every launch pre-trusts $PWD (the only folder the box sees), so there is no
 # trust prompt. The first launch also installs the default plugins (ponytail).
 #
+# The image turns off agy's self-update. Its telemetry is a setting on your
+# Google account, not in settings.json, so turn it off once in agy's /config
+# (Enable Telemetry).
+#
 # Language runtimes come from mise: its shims are on PATH, so a project's own
 # mise.toml applies in the non-interactive shells the agent runs commands in.
 # See tools/README.md for the customization options.

@@ -209,7 +209,9 @@ fi
 
 box_docker_bridge
 
-# not exec: the socat trap must outlive ocr
+# not exec: the socat trap must outlive ocr. OCR_NO_UPDATE: the version lives
+# in the image, so don't ask npm for a newer one.
 box_run_args
 box_run "${BOX_RUN_ARGS[@]}" \
+  --env OCR_NO_UPDATE=1 \
   "$BOX_IMAGE" "$@"
