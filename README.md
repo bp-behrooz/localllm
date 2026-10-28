@@ -166,9 +166,9 @@ drafter crashes llama.cpp under `-sm tensor`
 
 ## The radiance presets
 
-Four presets run on the
+Six presets run on the
 [radiance](https://codeberg.org/StillDeadcode/radiance) engine — C++/HIP with
-RDNA4 kernels and speculative decoding — each across both GPUs:
+RDNA4 kernels and speculative decoding:
 
 - `qwen3.8-flash-next` (preloaded): Qwen3.8-Flash-Next, an MoE with an int8
   trunk and 4-bit experts, 256K context. The experts that don't fit VRAM
@@ -177,6 +177,16 @@ RDNA4 kernels and speculative decoding — each across both GPUs:
   and the 114 GiB model on the `/opt` disk.
 - `qwen3.8-radiance`: Qwen3.8-27B in Qwen's own FP8 (128×128 blocks) with
   its DFlash2 drafter, 256K context.
+- `qwen3.8-m2xfp4`: Qwen3.8-27B as the PARO-M2XFP4 container (19.6 GiB,
+  4.25 bits a weight) with its DFlash2 drafter. **Single GPU only** — the
+  learned rotation is per projection, so radiance refuses `--tp > 1`. One 262K
+  sequence a replica; quality sits between plain MXFP4 and FP8 (KL 0.0211
+  against 0.0117).
+- `ornith-1.5`: Ornith-1.5-35B-A3B w4a8 (19.7 GiB) — a 35B-A3B MoE with
+  vision, tools and thinking, one card, 262K context, up to 8 sequences.
+  Decodes at about 229 tok/s on one R9700 — a 35B-A3B MoE is far quicker than
+  the 27B dense — at KL 0.064 to its bf16 original, so below the 27B FP8 in
+  fidelity. This is the second one-card preset.
 - `gemma4-heretic`: Gemma 4 31B heretic-ara (refusals removed) with a GPTQ
   int4 trunk, int8 activations and MTP, 64K context at 8 sequences
   (upstream's flags; 256K fits at `--max-num-seqs 2`).
@@ -203,7 +213,7 @@ done
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600 \
+    docker.io/stilldeadcode/radiance@sha256:e648ec53a68c42f329d80fbbc008ee96f5301ada6b100475c731d2ca1ebb9c16 \
     /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
     --recipe /opt/radiance/share/radiance/recipes/q38-27b-fp8block-df2.recipe \
     --set quantization_config.quant_method=fp8 --set quantization_config.fmt=e4m3 \
@@ -225,12 +235,12 @@ sudo pacman -S podman crun
 sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull docker.io/stilldeadcode/radiance@sha256:e82764045e46ebae07e33961f17dedba981c0d07336dfcddd67e4b3b042b8600
+  podman pull docker.io/stilldeadcode/radiance@sha256:e648ec53a68c42f329d80fbbc008ee96f5301ada6b100475c731d2ca1ebb9c16
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
 
-The radiance image is pinned by digest in `serve-radiance.sh` (currently 1.12.0), since
+The radiance image is pinned by digest in `serve-radiance.sh` (currently 1.13.0), since
 radiance releases rename and drop engine flags; upgrade by changing that pin
 and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
 driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,
