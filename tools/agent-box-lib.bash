@@ -60,7 +60,7 @@ box_knob() {
 
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
-#   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh, --docker, --search,
+#   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh[=host], --docker, --search,
 #   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
 # the whole command; with --rebuild or --build-only it runs first and the build
@@ -104,6 +104,10 @@ box_parse_args() {
       ;;
     --gh)
       printf -v "${BOX_ENV_PREFIX}_GH" '%s' 1
+      shift
+      ;;
+    --gh=host)
+      printf -v "${BOX_ENV_PREFIX}_GH" '%s' host
       shift
       ;;
     --docker)
@@ -915,7 +919,18 @@ _box_gh_env() {
   # --gh: hand the box the repo's GitHub token. Keyed by the main worktree, so
   # every worktree of the repo shares it. Exported rather than passed by value:
   # `--env NAME` inherits it, keeping the token out of the host's process list.
+  # --gh=host: hand it the host's own `gh auth token` instead, for this run only.
   BOX_GH_ENV=()
+  if [[ "$(box_knob GH)" == host ]]; then
+    if GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n $GH_TOKEN ]]; then
+      export GH_TOKEN
+      BOX_GH_ENV=(--env GH_TOKEN)
+      echo "==> gh: passing the host's own token (every repo it can reach)" >&2
+      return 0
+    fi
+    echo "error: --gh=host: no gh token on the host (run \`gh auth login\`)" >&2
+    exit 1
+  fi
   [[ "$(box_knob GH)" == 1 ]] || return 0
   local common key
   common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common="$(pwd -P)/.git"

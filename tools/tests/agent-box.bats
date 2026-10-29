@@ -698,3 +698,20 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   [[ $status -eq 1 ]]
   [[ $output == *"box-gh-token set"* ]]
 }
+@test "gh: --gh=host passes the host's gh token, not the stored one" {
+  load_lib
+  BOX_ENV_PREFIX=CL_BOX; box_parse_args --gh=host
+  git init -q "$BATS_TEST_TMPDIR/repo"; cd "$BATS_TEST_TMPDIR/repo"
+  _box_gh_keychain_get() { echo tok-repo; }
+  gh() { [[ $* == "auth token" ]] && echo tok-host; }
+  _box_gh_env
+  [[ $GH_TOKEN == tok-host && " ${BOX_GH_ENV[*]} " == *" --env GH_TOKEN "* ]]
+}
+@test "gh: --gh=host without a host token is refused" {
+  load_lib
+  BOX_ENV_PREFIX=CL_BOX; CL_BOX_GH=host
+  gh() { return 1; }
+  run _box_gh_env
+  [[ $status -eq 1 ]]
+  [[ $output == *"gh auth login"* ]]
+}

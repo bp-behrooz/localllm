@@ -53,8 +53,9 @@ distro just for the boxes. They default to `crun` there, without krun's VM.
 
 `--docker` lets the agent use the host's Docker (podman's API on Linux, so no
 BuildKit: `buildx` and `RUN --mount` don't work; point `*_BOX_DOCKER_SOCK` at a
-real Docker socket if you need them). `--ssh` forwards your ssh-agent and your
-`gh` token.
+real Docker socket if you need them). `--ssh` forwards your ssh-agent. `--gh`
+passes the repo's token from `box-gh-token set`; `--gh=host` passes your own
+`gh auth token` for that run only.
 
 A Unix socket can't cross a VM boundary, so `socat` serves each one on a free
 host-loopback port (24100-24199) for the session. The box reaches it at
@@ -210,7 +211,7 @@ To change the shared base for everyone, edit `box_dockerfile_base` in
 
 ## Flags
 
-Shared: `--rebuild`, `--build-only`, `--ssh`, `--docker`, `--search`,
+Shared: `--rebuild`, `--build-only`, `--ssh`, `--gh[=host]`, `--docker`, `--search`,
 `--profile NAME`, `--clean`, `--clean-all`, `--clean-data`, `--shell`. pi-box, opencode-box
 and ocr-box add `--sync` / `--sync-only` to refresh the model list from the
 server. Everything else goes to the agent.
