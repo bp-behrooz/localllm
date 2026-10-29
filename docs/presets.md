@@ -64,7 +64,7 @@ sudo pacman -S podman crun
 sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull docker.io/stilldeadcode/radiance@sha256:e648ec53a68c42f329d80fbbc008ee96f5301ada6b100475c731d2ca1ebb9c16
+  podman pull docker.io/stilldeadcode/radiance@sha256:69add58f7de1ed2bca2b1e20a4cc75717557df3f73569a178eca5aafe8c44093
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
@@ -73,7 +73,7 @@ sudo systemctl restart localllm
 don't want, and delete its preset from the table (and `PRELOAD`). Cold start is slower than a llama-server preset: engine init plus
 loading the model, several minutes for Flash-Next.
 
-The image is pinned by digest in `serve-radiance.sh` (currently 1.13.0), since
+The image is pinned by digest in `serve-radiance.sh` (currently 1.14.0), since
 radiance releases rename and drop engine flags; upgrade by changing that pin
 and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
 driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,
@@ -96,7 +96,7 @@ done
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:e648ec53a68c42f329d80fbbc008ee96f5301ada6b100475c731d2ca1ebb9c16 \
+    docker.io/stilldeadcode/radiance@sha256:69add58f7de1ed2bca2b1e20a4cc75717557df3f73569a178eca5aafe8c44093 \
     /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
     --recipe /opt/radiance/share/radiance/recipes/q38-27b-fp8block-df2.recipe \
     --set quantization_config.quant_method=fp8 --set quantization_config.fmt=e4m3 \
