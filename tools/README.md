@@ -49,6 +49,24 @@ host. The agents run as root, so that's rare.
 **Windows:** WSL2, set up as in [docs/WSL2.md](../docs/WSL2.md), ideally a
 distro just for the boxes. They default to `crun` there, without krun's VM.
 
+## The local server
+
+pi-box, opencode-box and ocr-box take the server's base URL and key from the
+environment:
+
+```bash
+export LOCAL_LLM_URL=https://example.com/localllm/v1
+export LOCAL_LLM_API_KEY=sk-xxx
+pi-box                # or: opencode-box
+ocr-box review        # or: ocr-box scan; one model per run
+```
+
+On first launch (or with `--sync`) they query the server and write the served
+models into the box's own config; re-run with `--sync` after preset changes.
+pi-box and opencode-box record context limits too; ocr-box writes a `localllm`
+provider that `ocr` prefers over any environment, reviewing with
+`OCR_BOX_MODEL` (default: the first model the server reports).
+
 ## Docker and ssh
 
 `--docker` lets the agent use the host's Docker (podman's API on Linux, so no

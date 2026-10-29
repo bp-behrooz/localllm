@@ -81,7 +81,7 @@ hf_fetch() { # <preset>
       fi
     done
     RAD=$rad RAD_REPO=$repo
-    [[ "$RAD_REPO" == - ]] && { echo "skipping $1: $RAD is converted locally (see README)"; return 0; }
+    [[ "$RAD_REPO" == - ]] && { echo "skipping $1: $RAD is converted locally (see docs/presets.md)"; return 0; }
     install -d -o localllm -g localllm /opt/localllm/models
     sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
       /opt/localllm/venv/bin/hf download "$RAD_REPO" "$RAD" \
@@ -173,7 +173,7 @@ remove)
     done
     rm -f "/opt/localllm/models/$RAD"
     echo "removed $2's /opt/localllm/models/$RAD"
-    [[ "$RAD_REPO" == - ]] && echo "it was converted locally: download can't bring it back, the README's conversion can"
+    [[ "$RAD_REPO" == - ]] && echo "it was converted locally: download can't bring it back, the one in docs/presets.md can"
     echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed)"
     exit 0
   fi
