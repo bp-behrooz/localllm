@@ -27,9 +27,10 @@ declare -A PRESET=(
   [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-w4a8 MAXLEN=65536 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad --max-num-seqs 8 --kv-cache-dtype fp8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
   [nanbeige4.3]="2|bartowski/Nanbeige_Nanbeige4.3-33B-GGUF:Q5_K_M|-sm tensor -c 262144 -ctk q8_0 -ctv q8_0 --temp 0.6 --top-p 0.95"
   [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-fp8-iq4r-moe.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 96 --kv-cache-dtype fp8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
-  # M2XFP4 is single-GPU only: its learned rotation is per projection, so
-  # radiance refuses --tp > 1. One 262K sequence a replica, 19.6 GiB of weights.
-  [qwen3.8-m2xfp4]="1|cmd|RAD_REPO=hugypufy/Qwen3.8-27B-DFLASH2-PARO-M2XFP4 MAXLEN=262144 /opt/localllm/serve-radiance.sh Qwen3.8-27B-DFLASH2-PARO-M2XFP4.rad --max-num-seqs 1 --kv-cache-dtype fp8"
+  # IQR-V3 on one card: 19.4 GiB of weights at 5.42 bpw, one 262K sequence a
+  # replica (the 16 full-attention layers' fp8 KV is 32 KiB a token, 8 GiB at
+  # 262K). The repo is named iqr, not after the file, hence RAD_REPO.
+  [qwen3.8-iq5r]="1|cmd|RAD_REPO=StillDeadcode/qwen3.8-27b-iqr-v3 MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-iq5r-v3.rad --max-num-seqs 1 --kv-cache-dtype fp8"
   # The other one-card option: a 35B-A3B MoE whose 4-bit experts fit with room
   # for 262K. The card's coding settings; thinking stays on by default.
   [ornith-1.5]="1|cmd|RAD_REPO=keptn/ornith-1.5-35b-a3b-w4a8 MAXLEN=262144 /opt/localllm/serve-radiance.sh ornith-1.5-35b-a3b-w4a8.rad --max-num-seqs 8 --kv-cache-dtype fp8 --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 0.6 --top-p 0.95 --top-k 20 --presence-penalty 0"

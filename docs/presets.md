@@ -30,11 +30,14 @@ RDNA4 kernels and speculative decoding:
   and the 114 GiB model on the `/opt` disk.
 - `qwen3.8-radiance`: Qwen3.8-27B in Qwen's own FP8 (128×128 blocks) with
   its DFlash2 drafter, 256K context.
-- `qwen3.8-m2xfp4`: Qwen3.8-27B as the PARO-M2XFP4 container (19.6 GiB,
-  4.25 bits a weight) with its DFlash2 drafter. **Single GPU only**: the
-  learned rotation is per projection, so radiance refuses `--tp > 1`. One 262K
-  sequence a replica; quality sits between plain MXFP4 and FP8 (KL 0.0211
-  against 0.0117).
+- `qwen3.8-iq5r`: Qwen3.8-27B in IQR-V3, radiance's trellis format (19.4 GiB,
+  5.42 bits a weight): every trunk linear rotated by a 128-wide Hadamard and
+  fitted by GPTQ against calibration Hessians, its codes decoded inside the
+  GEMM. Its DFlash2 drafter and vision tower are merged in. One card, one 262K
+  sequence a replica: the 16 full-attention layers' fp8 KV is 32 KiB a token,
+  8 GiB at 262K. KL 0.00182 and 98.38% top-1 against the bf16 model, against
+  0.0211 for the PARO-M2XFP4 container it replaces. **Radiance 1.15 or newer**:
+  the IQR-V3 kernels and the `qwen35_w8a8` plugin that reads them ship there.
 - `ornith-1.5`: Ornith-1.5-35B-A3B w4a8 (19.7 GiB), a 35B-A3B MoE with
   vision, tools and thinking, one card, 262K context, up to 8 sequences.
   About 229 tok/s on one R9700, far quicker than the 27B dense, at KL 0.064
@@ -64,7 +67,7 @@ sudo pacman -S podman crun
 sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull docker.io/stilldeadcode/radiance@sha256:69add58f7de1ed2bca2b1e20a4cc75717557df3f73569a178eca5aafe8c44093
+  podman pull docker.io/stilldeadcode/radiance@sha256:1f8529b3895a827ef4af444de7310751978a137c427e4a66f70d8e9cecfa62c5
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
@@ -73,7 +76,7 @@ sudo systemctl restart localllm
 don't want, and delete its preset from the table (and `PRELOAD`). Cold start is slower than a llama-server preset: engine init plus
 loading the model, several minutes for Flash-Next.
 
-The image is pinned by digest in `serve-radiance.sh` (currently 1.14.0), since
+The image is pinned by digest in `serve-radiance.sh` (currently 1.15.1), since
 radiance releases rename and drop engine flags; upgrade by changing that pin
 and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
 driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,
@@ -96,7 +99,7 @@ done
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:69add58f7de1ed2bca2b1e20a4cc75717557df3f73569a178eca5aafe8c44093 \
+    docker.io/stilldeadcode/radiance@sha256:1f8529b3895a827ef4af444de7310751978a137c427e4a66f70d8e9cecfa62c5 \
     /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
     --recipe /opt/radiance/share/radiance/recipes/q38-27b-fp8block-df2.recipe \
     --set quantization_config.quant_method=fp8 --set quantization_config.fmt=e4m3 \

@@ -11,9 +11,9 @@ set -euo pipefail
 model=$1
 shift
 MODEL_DIR=/opt/localllm/models
-# pinned by digest (1.14.0): presets pass engine flags that releases rename
+# pinned by digest (1.15.1): presets pass engine flags that releases rename
 # or drop, so bump this together with them
-IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:69add58f7de1ed2bca2b1e20a4cc75717557df3f73569a178eca5aafe8c44093}
+IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:1f8529b3895a827ef4af444de7310751978a137c427e4a66f70d8e9cecfa62c5}
 [ -f "$MODEL_DIR/$model" ] || {
   echo "missing $MODEL_DIR/$model; fetch it with: sudo ./setup.sh download <this preset>" >&2
   exit 1
