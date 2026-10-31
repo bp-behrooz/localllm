@@ -87,4 +87,11 @@ grep -q '^stale.rad \|^gone.rad ' "$MANIFEST" && fail "manifest kept a removed f
 out=$(prune_models --yes) || fail "second prune failed: $out"
 [[ $out == *"nothing to prune"* ]] || fail "second prune: $out"
 rm -rf "$MODELS"
+
+# the docs' copyable commands carry the pin's digest, or a bump ships a stale one
+pin=$(sed -n 's/^IMAGE=.*@\(sha256:[0-9a-f]*\)}.*/\1/p' pool/serve-radiance.sh)
+[[ -n $pin ]] || fail "no image pin read from pool/serve-radiance.sh"
+grep -q "radiance@$pin" docs/presets.md || fail "docs/presets.md doesn't carry the pin's digest"
+stale=$(grep -o 'radiance@sha256:[0-9a-f]*' docs/presets.md | grep -v "$pin" | sort -u)
+[[ -z $stale ]] || fail "docs/presets.md names a digest the pin doesn't: $stale"
 echo "setup-test ok"

@@ -83,12 +83,12 @@ line and is never removed, only listed. It prints the plan and deletes
 nothing until `--yes`. Re-running `download` on a preset that is already
 local records it, which backfills the record.
 
-The image is pinned by digest in `serve-radiance.sh` (currently 1.15.1), since
-radiance releases rename and drop engine flags; upgrade by changing that pin
-and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu
-driver of interface 3.64 or later (Linux 6.16+): on an older kernel it starts,
-but without GPU virtual memory, so Flash-Next's KV cache can't lend VRAM to
-the experts.
+`serve-radiance.sh` pins the image by digest, and the comment beside the pin
+names its release. Radiance releases rename and drop engine flags, so move
+that pin and the presets' flags together. Its ROCm 10.1 userspace needs an
+amdgpu driver of interface 3.64 or later (Linux 6.16+): on an older kernel it
+starts, but without GPU virtual memory, so Flash-Next's KV cache can't lend
+VRAM to the experts.
 
 ### Converting thinkingcap
 
