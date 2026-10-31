@@ -106,6 +106,7 @@ After editing presets, re-run `sudo ./setup.sh` to apply. Other subcommands:
 ```bash
 ./setup.sh download [preset]…   # pre-fetch (all presets if none named)
 ./setup.sh remove <preset>      # delete a preset's downloaded files
+./setup.sh prune [--yes]        # delete downloaded .rads no preset names
 ```
 
 ## Scheduling behavior

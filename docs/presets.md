@@ -76,6 +76,13 @@ sudo systemctl restart localllm
 don't want, and delete its preset from the table (and `PRELOAD`). Cold start is slower than a llama-server preset: engine init plus
 loading the model, several minutes for Flash-Next.
 
+`prune` deletes what `download` fetched that no preset names any more, and
+only that: every fetch is recorded in `models/.managed`, so a `.rad` built
+here with `rad-convert` — or one old enough to predate the record — has no
+line and is never removed, only listed. It prints the plan and deletes
+nothing until `--yes`. Re-running `download` on a preset that is already
+local records it, which backfills the record.
+
 The image is pinned by digest in `serve-radiance.sh` (currently 1.15.1), since
 radiance releases rename and drop engine flags; upgrade by changing that pin
 and the presets' flags together. Its ROCm 10.1 userspace needs an amdgpu

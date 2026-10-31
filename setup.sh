@@ -3,6 +3,8 @@
 #        ./setup.sh download [preset]…  pre-fetch models (all of them if none named;
 #                                       else the pool downloads on first request, slower)
 #        ./setup.sh remove <preset>     delete a preset's downloaded files
+#        ./setup.sh prune [--yes]       delete .rads `download` fetched that no preset
+#                                       names; a .rad built by hand is never touched
 #        ./setup.sh key add|rm <name>   issue (printed once) or revoke an API key
 #        ./setup.sh key list            name every key; changes apply within KEYS_RECHECK (5 min)
 # First run ever: HF_TOKEN=hf_xxx ./setup.sh   (token is stored, not needed again)
@@ -43,6 +45,7 @@ usage() {
   echo "usage: $0                     apply config (all presets served on demand)"
   echo "       $0 download [preset]…  pre-fetch model files (no preset: all of them)"
   echo "       $0 remove <preset>     delete a preset's downloaded files"
+  echo "       $0 prune [--yes]       delete downloaded .rads no preset names"
   echo "       $0 key add|rm <name>   issue (printed once) or revoke an API key"
   echo "       $0 key list            name every key"
   echo "presets: ${!PRESET[*]}"
@@ -87,6 +90,7 @@ hf_fetch() { # <preset>
     sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
       /opt/localllm/venv/bin/hf download "$RAD_REPO" "$RAD" \
       --local-dir /opt/localllm/models
+    manifest_add "$RAD" "$RAD_REPO"   # already local counts too: it backfills the record
     return
   fi
   IFS='|' read -r _ m _ <<<"${PRESET[$1]}"
@@ -97,6 +101,80 @@ hf_fetch() { # <preset>
   sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
     HF_HUB_CACHE=/opt/localllm/.cache/huggingface/hub \
     /opt/localllm/venv/bin/hf download "$repo" "${inc[@]}"
+}
+
+# Which .rads `download` fetched, so `prune` can tell one from a build by hand:
+# "<file> <repo>" a line in $MANIFEST. A file with no line is never deleted,
+# only reported — a container converted here with rad-convert has no line.
+MODELS=/opt/localllm/models
+MANIFEST=$MODELS/.managed
+
+manifest_write() { # stdin -> $MANIFEST, in one rename; stays localllm's
+  local tmp
+  [[ -d $MODELS ]] || return 0
+  tmp=$(mktemp "$MODELS/.managed.XXXXXX")
+  cat >"$tmp"
+  chown localllm:localllm "$tmp"
+  chmod 644 "$tmp"
+  mv "$tmp" "$MANIFEST"
+}
+
+manifest_add() { # <file> <repo>
+  { awk -v f="$1" '$1 != f' "$MANIFEST" 2>/dev/null || true
+    printf '%s %s\n' "$1" "$2"; } | manifest_write
+}
+
+manifest_drop() { # <file>
+  [[ -f $MANIFEST ]] || return 0
+  awk -v f="$1" '$1 != f' "$MANIFEST" | manifest_write
+}
+
+prune_models() { # [--yes]: delete downloaded .rads no preset names; never a build by hand
+  local p f repo
+  local -A used=() rec=() stale=() manual=()
+  local -a stale_list=() manual_list=()
+  for p in "${!PRESET[@]}"; do
+    if is_radiance "$p"; then used[$RAD]=$p; fi
+  done
+  if [[ -f $MANIFEST ]]; then
+    while read -r f repo; do
+      [[ -n ${f:-} && $f != \#* ]] || continue
+      rec[$f]=${repo:--}
+    done <"$MANIFEST"
+  fi
+  for f in "${!rec[@]}"; do
+    [[ -n ${used[$f]:-} ]] && continue
+    if [[ -f "$MODELS/$f" ]]; then stale[$f]=${rec[$f]}; fi
+  done
+  for f in "$MODELS"/*.rad; do
+    [[ -e $f ]] || continue
+    f=${f##*/}
+    if [[ -z ${used[$f]:-} && -z ${rec[$f]:-} ]]; then manual[$f]=1; fi
+  done
+  mapfile -t stale_list < <(for f in "${!stale[@]}"; do echo "$f"; done | sort)
+  mapfile -t manual_list < <(for f in "${!manual[@]}"; do echo "$f"; done | sort)
+  echo "models: $MODELS (${#used[@]} .rad(s) named by a preset)"
+  if ((${#stale_list[@]})); then
+    echo "downloaded by setup.sh, no preset names them:"
+    for f in "${stale_list[@]}"; do
+      printf '  %6s  %s  (from %s)\n' "$(du -h "$MODELS/$f" | cut -f1)" "$f" "${stale[$f]}"
+    done
+  fi
+  if ((${#manual_list[@]})); then
+    echo "left alone, no download record (built by hand, or older than the record):"
+    for f in "${manual_list[@]}"; do
+      printf '  %6s  %s\n' "$(du -h "$MODELS/$f" | cut -f1)" "$f"
+    done
+  fi
+  ((${#stale_list[@]})) || { echo "nothing to prune"; return 0; }
+  [[ ${1:-} == --yes ]] || { echo "add --yes to delete those ${#stale_list[@]}"; return 0; }
+  for f in "${stale_list[@]}"; do
+    rm -f -- "$MODELS/$f"
+    echo "removed $f"
+  done
+  for f in "${!rec[@]}"; do # drop the lines of what is gone now
+    if [[ -f "$MODELS/$f" ]]; then printf '%s %s\n' "$f" "${rec[$f]}"; fi
+  done | manifest_write
 }
 
 # API keys: /opt/localllm/keys, "name sha256" per line. Only the hash is kept,
@@ -173,6 +251,7 @@ remove)
       fi
     done
     rm -f "/opt/localllm/models/$RAD"
+    manifest_drop "$RAD"
     echo "removed $2's /opt/localllm/models/$RAD"
     [[ "$RAD_REPO" == - ]] && echo "it was converted locally: download can't bring it back, the one in docs/presets.md can"
     echo "still yours to delete: the $2 entry in PRESET (and PRELOAD if listed)"
@@ -192,6 +271,11 @@ remove)
     done
   fi
   du -sh "$dir" 2>/dev/null || echo "repo fully removed"
+  exit 0
+  ;;
+prune)
+  [[ $# -eq 1 || ( $# -eq 2 && $2 == --yes ) ]] || usage
+  prune_models "${2:-}"
   exit 0
   ;;
 *) usage ;;
