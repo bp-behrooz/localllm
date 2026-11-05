@@ -67,7 +67,7 @@ sudo pacman -S podman crun
 sudo ./setup.sh
 cd /opt/localllm   # podman must start in a dir localllm can enter
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull docker.io/stilldeadcode/radiance@sha256:1f8529b3895a827ef4af444de7310751978a137c427e4a66f70d8e9cecfa62c5
+  podman pull docker.io/stilldeadcode/radiance@sha256:6fb0e99bfb862e17cc15cb7b2f116c7dbdc831df59f82456a0691122e6cf5330
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
@@ -106,7 +106,7 @@ done
 sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:1f8529b3895a827ef4af444de7310751978a137c427e4a66f70d8e9cecfa62c5 \
+    docker.io/stilldeadcode/radiance@sha256:6fb0e99bfb862e17cc15cb7b2f116c7dbdc831df59f82456a0691122e6cf5330 \
     /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
     --recipe /opt/radiance/share/radiance/recipes/q38-27b-fp8block-df2.recipe \
     --set quantization_config.quant_method=fp8 --set quantization_config.fmt=e4m3 \
