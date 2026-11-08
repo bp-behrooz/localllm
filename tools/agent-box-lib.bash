@@ -1,11 +1,11 @@
 # shellcheck shell=bash
 # agent-box-lib.bash: the half of every *-box script that isn't about the agent —
-# image lifecycle, the Mac-loopback DNS domain, the Docker bridge, and the
+# image lifecycle, the per-port forwards to the host, the Docker bridge, and the
 # `container run` flags they all pass.
 #
 # Two hosts run the same image: a Mac, through Apple's `container` CLI (a VM),
 # and Linux (Arch), through rootless podman — no VM, and the Mac-only machinery
-# (socat bridge, pf/DNS-domain, per-boot sudo) is skipped there. Everything
+# (the gateway forwards) is skipped there. Everything
 # host-specific below branches on BOX_CTR.
 #
 # A library, not a program: it has no shebang, isn't executable, and each *-box
@@ -25,8 +25,8 @@
 #                    image is behind what the tag points to now
 #
 # BOX_ENV_PREFIX is how the shared knobs stay named after their own tool:
-# everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_ALIAS,
-# _HOST_ALIAS_IP, _SSH, _SEARCH, _CPUS, _MEMORY, _PROFILE and _RUNTIME, and names that same
+# everything below reads ${BOX_ENV_PREFIX}_DOCKER, _DOCKER_SOCK, _HOST_PORT,
+# _HOST_GATEWAY, _SSH, _SEARCH, _CPUS, _MEMORY, _PROFILE and _RUNTIME, and names that same
 # variable when it has to complain about it.
 #
 # ...and defines one function:
@@ -58,13 +58,41 @@ box_knob() {
   printf '%s' "${val:-${2-}}"
 }
 
+# _box_port N: success (0) when N is a TCP port, failure (1) otherwise. A leading
+# zero would read as octal in arithmetic, so read the value as decimal.
+_box_port() {
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# _box_ports LIST: append each comma-separated port in LIST to BOX_HOST_PORTS,
+# skipping repeats. Returns 1 (appending nothing) if any part is not a port.
+_box_ports() {
+  local list="$1" p q _box_ports_arr
+  [[ -n $list ]] || return 0
+  local IFS=,
+  read -ra _box_ports_arr <<<"$list"
+  for p in "${_box_ports_arr[@]}"; do
+    _box_port "$p" || return 1
+  done
+  for p in "${_box_ports_arr[@]}"; do
+    p=$((10#$p))
+    for q in ${BOX_HOST_PORTS[@]+"${BOX_HOST_PORTS[@]}"}; do
+      [[ $q == "$p" ]] && continue 2
+    done
+    BOX_HOST_PORTS+=("$p")
+  done
+  return 0
+}
+
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
 #   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh[=host], --docker, --search,
-#   --profile[=NAME], --shell
+#   --host-port <port>, --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
 # the whole command; with --rebuild or --build-only it runs first and the build
-# follows (see box_clean_or_exit).
+# follows (see box_clean_or_exit). --host-port takes a port or a comma-separated
+# list, repeatable, into BOX_HOST_PORTS (see _box_host_port_args).
 # Remaining arguments are left in BOX_ARGS; caller typically runs:
 #   box_parse_args "$@"
 #   set -- ${BOX_ARGS[@]+"${BOX_ARGS[@]}"}
@@ -75,6 +103,7 @@ box_parse_args() {
   SYNC=0
   SYNC_ONLY=0
   BOX_SHELL=0
+  BOX_HOST_PORTS=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,6 +141,24 @@ box_parse_args() {
       ;;
     --docker)
       printf -v "${BOX_ENV_PREFIX}_DOCKER" '%s' 1
+      shift
+      ;;
+    --host-port)
+      [[ $# -ge 2 ]] || {
+        echo "error: --host-port requires a port" >&2
+        exit 1
+      }
+      [[ -n $2 ]] && _box_ports "$2" || {
+        echo "error: --host-port '$2': not a port" >&2
+        exit 1
+      }
+      shift 2
+      ;;
+    --host-port=*)
+      [[ -n ${1#--host-port=} ]] && _box_ports "${1#--host-port=}" || {
+        echo "error: --host-port '${1#--host-port=}': not a port" >&2
+        exit 1
+      }
       shift
       ;;
     --search)
@@ -166,6 +213,15 @@ box_parse_args() {
       exit 1
     }
   done
+
+  # The flag wins over ${BOX_ENV_PREFIX}_HOST_PORT (same syntax).
+  if [[ -z ${BOX_HOST_PORTS[*]-} ]]; then
+    val="$(box_knob HOST_PORT)"
+    _box_ports "$val" || {
+      echo "error: ${BOX_ENV_PREFIX}_HOST_PORT '$val': not a port" >&2
+      exit 1
+    }
+  fi
 }
 
 # --------------------------------------------------------------- runtime -----
@@ -262,6 +318,9 @@ box_require_runtime() {
     echo "==> starting container runtime" >&2
     container system start
   fi
+  # Before the build, not after: a box that won't start shouldn't wait for one.
+  # --build-only starts no box, so it has nothing to ask.
+  [[ ${BUILD_ONLY:-0} -eq 1 ]] || _box_old_alias_down
 }
 
 # ----------------------------------------------------------------- image -----
@@ -341,21 +400,32 @@ ENV PATH=/root/.local/share/mise/shims:$PATH
 # box-entry runs ahead of the agent (box_build_image puts it in front of the
 # agent's ENTRYPOINT). Under krun the ssh-agent arrives as a TCP port on the
 # host, since a bind-mounted Unix socket doesn't cross the VM boundary; turn it
-# back into the socket ssh expects. Fill any empty VOLUME from the copy taken at
-# build time (podman fills a new volume itself; Apple's container doesn't, and
-# hands over a fresh ext4 with only lost+found). A failing hook stops the box:
+# back into the socket ssh expects. On a Mac, each --host-port port arrives at
+# its own port on the VM network's gateway (BOX_HOST_PORTS holds port:gateway
+# port pairs); relay it from the box's own 127.0.0.1. Fill any empty
+# VOLUME from the copy taken at build time (podman fills a new volume itself;
+# Apple's container doesn't, and hands over a fresh ext4 with only
+# lost+found). A failing hook stops the box:
 # an agent without the services it expects is worse than an error.
 # Then run the hooks in /etc/box-entry.d (a profile's Dockerfile can start
 # services there) and hand over. With hooks in
 # /etc/box-exit.d it stays around instead, and runs them once the agent exits,
-# so services stop cleanly before the box is torn down. The label tells the
-# host which box-entry this image has.
+# so services stop cleanly before the box is torn down. The relays' socat logs
+# to /tmp/box-entry-socat.log, not the agent's terminal, each relay's share
+# capped at 1 MiB (the box's /tmp is RAM); `cap` keeps reading past it, so
+# socat never blocks. The label tells the host which box-entry this image has.
 RUN mkdir -p /etc/box-entry.d /etc/box-exit.d \
  && printf '%s\n' '#!/bin/sh' \
+      'cap() { awk -v max=1048576 "{ n += length(\$0) + 1 } n <= max { print; fflush(); next } !c { print \"(log capped at 1 MiB; the rest dropped)\"; fflush(); c = 1 }" >>/tmp/box-entry-socat.log; }' \
       'if [ -n "$BOX_SSH_AGENT_TCP" ]; then' \
-      '  socat "UNIX-LISTEN:$SSH_AUTH_SOCK,fork,unlink-early,mode=600" "TCP:$BOX_SSH_AGENT_TCP" &' \
+      '  socat "UNIX-LISTEN:$SSH_AUTH_SOCK,fork,unlink-early,mode=600" "TCP:$BOX_SSH_AGENT_TCP" 2>&1 | cap &' \
       '  i=0; while [ ! -S "$SSH_AUTH_SOCK" ] && [ $i -lt 50 ]; do sleep 0.05; i=$((i + 1)); done' \
       'fi' \
+      'for m in $BOX_HOST_PORTS; do' \
+      '  p=${m%%:*}' \
+      '  socat "TCP-LISTEN:$p,bind=127.0.0.1,reuseaddr,fork" "TCP:$BOX_HOST_GATEWAY:${m#*:}" 2>&1 | cap &' \
+      '  i=0; while ! grep -q ":$(printf %04X "$p") 00000000:0000 0A" /proc/net/tcp && [ $i -lt 50 ]; do sleep 0.05; i=$((i + 1)); done' \
+      'done' \
       'if [ -f /etc/box-volumes ]; then while read -r p; do' \
       '  s="/usr/local/share/box-seed$p"' \
       '  [ -z "$(ls -A "$p" 2>/dev/null | grep -vx lost+found)" ] || continue' \
@@ -370,7 +440,7 @@ RUN mkdir -p /etc/box-entry.d /etc/box-exit.d \
       'for f in /etc/box-exit.d/*; do [ -x "$f" ] && "$f"; done' \
       'exit $rc' >/usr/local/bin/box-entry \
  && chmod +x /usr/local/bin/box-entry
-LABEL agent-box.entry=5
+LABEL agent-box.entry=8
 
 EOF
 }
@@ -631,75 +701,222 @@ _box_volume_names() {
   fi
 }
 
-# ------------------------------------------------------------ host alias -----
-# The address the box reaches host loopback by. On podman (only bridged under
-# krun) it is a link-local IP that pasta maps to the host's 127.0.0.1 (see
-# _box_runtime_args); podman's own host.containers.internal won't do, as it
-# lands on the host's LAN address. On a Mac it is a localhost DNS domain
-# (box_ensure_host_alias).
-BOX_PASTA_LOOPBACK=169.254.1.3
-box_host_alias() {
+# ----------------------------------------------------------- host access -----
+# Everything that reaches the host goes through one per-port mechanism, so no
+# box is ever given all of the host's loopback: the --host-port ports, and the
+# ssh/docker bridges (a Unix socket can't cross a VM boundary, so _box_bridge
+# serves it on a TCP port).
+#
+# podman: pasta forwards each port (-T). The box dials 127.0.0.1:<port> and
+# lands on the same port of the host's 127.0.0.1, and nothing else there
+# (podman adds --no-map-gw). Each box has its own pasta, so other boxes can't
+# use its forwards.
+#
+# Mac: there is no per-port option. Each forward gets a free port on the VM
+# network's gateway, which socat serves once the box is up, to the box's own
+# IP only (_box_mac_forwards). The box dials the gateway; for --host-port,
+# box-entry relays each port from the box's own 127.0.0.1.
+BOX_PASTA_FWD=() # podman: host loopback ports to forward
+BOX_MAC_FWD=()   # Mac: "<gateway port> <socat address>", one per forward
+
+_box_gateway() { box_knob HOST_GATEWAY 192.168.64.1; }
+
+# The address the box dials for a forwarded port.
+_box_forward_addr() {
   if [[ ${BOX_CTR[0]} == podman ]]; then
-    printf '%s' "$BOX_PASTA_LOOPBACK"
+    printf '127.0.0.1'
   else
-    box_knob HOST_ALIAS host.container.internal
+    _box_gateway
   fi
 }
 
-box_ensure_host_alias() {
-  # macOS-only: podman already resolves its alias to host loopback.
-  [[ ${BOX_CTR[0]} == container ]] || return 0
-
-  # A "localhost domain" is two host-side things: /etc/resolver/containerization.<domain>
-  # and a pf rdr rule in the com.apple/container anchor. The resolver file survives a
-  # reboot, the pf rule doesn't — hence the once-per-boot check, tracked by kernel boot
-  # time and shared by all the *-box scripts. Neither touches the container runtime, so
-  # there is nothing to restart and other boxes keep running.
-  local alias="$1" ip resolver anchor
-  ip="$(box_knob HOST_ALIAS_IP 203.0.113.113)"
-  resolver="/etc/resolver/containerization.$alias"
-  anchor="/etc/pf.anchors/com.apple.container"
-  local stamp="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot" boot
-  boot=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/')
-
-  # `dns create --localhost <ip>` writes "options localhost:<ip>" into the resolver
-  # file, so that line means the domain is configured for the IP we want — the same
-  # predicate gates both the fast path and the reload-vs-setup choice below, so a
-  # changed ${BOX_ENV_PREFIX}_HOST_ALIAS_IP can't be missed within a boot.
-  local configured=0
-  if [[ -f "$resolver" && -f "$anchor" ]] && grep -qF "localhost:$ip" "$resolver"; then
-    configured=1
-  fi
-
-  if [[ $configured -eq 1 && -f "$stamp" && "$(cat "$stamp")" == "$boot" ]]; then
+# --host-port: the agent dials 127.0.0.1:<port> as if the service ran in the
+# box (see host access above).
+_box_host_port_args() {
+  [[ -n ${BOX_HOST_PORTS[*]-} ]] || return 0
+  local list p map=()
+  list="$(IFS=,; echo "${BOX_HOST_PORTS[*]}")"
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    BOX_PASTA_FWD+=("${BOX_HOST_PORTS[@]}")
+    echo "==> host: 127.0.0.1:$list forwarded to the host (only those)" >&2
     return 0
   fi
 
-  if [[ $configured -eq 1 ]]; then
-    # Only the pf rule can be stale. Reload it — `dns delete`+`create` would tear the
-    # domain down and HUP mDNSResponder, a DNS blip for everything else on the Mac.
-    echo "==> reloading the '$alias' pf rule (sudo, once per boot)" >&2
-    # pfctl always warns about -f flushing the main ruleset (it doesn't: -a scopes the
-    # load to the anchor) and about ALTQ. Drop that noise unless the load fails. Not -q:
-    # the sudoers entry in tools/README.md matches these exact args.
-    local out
-    if ! out=$(sudo /sbin/pfctl -a com.apple/container -f "$anchor" 2>&1); then
-      printf '%s\n' "$out" >&2
-      return 1
-    fi
-    printf '%s\n' "$out" | grep -vE \
-      -e '^pfctl: Use of -f option' -e '^present in the main ruleset' \
-      -e '^See /etc/pf.conf' -e '^No ALTQ support' -e '^ALTQ related functions' \
-      -e '^$' >&2 || true
-  else
-    echo "==> setting up '$alias' -> Mac loopback (sudo, once per boot)" >&2
-    sudo container system dns delete "$alias" >/dev/null 2>&1 || true
-    sudo container system dns create "$alias" --localhost "$ip"
+  local info
+  info="$(_box_entry_version)"
+  # 7 brought box-entry's port:gateway-port pairs, which this needs; 8 only
+  # moved its socat's messages into a log
+  [[ ${info:-0} -ge 7 ]] || {
+    echo "error: $BOX_IMAGE predates the box-entry --host-port needs; rerun with --build-only" >&2
+    exit 1
+  }
+  command -v socat >/dev/null || {
+    echo "error: --host-port needs socat (brew install socat)" >&2
+    exit 1
+  }
+  for p in "${BOX_HOST_PORTS[@]}"; do
+    _box_free_port "$(_box_gateway)"
+    BOX_MAC_FWD+=("$BOX_FREE_PORT TCP:127.0.0.1:$p")
+    map+=("$p:$BOX_FREE_PORT")
+  done
+  BOX_RUN_ARGS+=(--env "BOX_HOST_GATEWAY=$(_box_gateway)" --env "BOX_HOST_PORTS=${map[*]}")
+  echo "==> host: 127.0.0.1:$list forwarded to the Mac (only those, only this box)" >&2
+}
+
+# _box_free_port ADDR: set BOX_FREE_PORT to a port in BOX_BRIDGE_PORTS that
+# nothing listens on at ADDR, reserved for this launch (_box_reserve_port). It
+# starts at a random offset, so concurrent launches rarely want the same one,
+# and the reservation settles it when they do: on a Mac a forward only listens
+# once its box is up, seconds after the port was picked. podman: a port is free
+# when nothing answers on it; host loopback refuses a closed port at once. Mac:
+# no probing, as macOS may silently drop a connection to a closed port on the
+# gateway (the firewall's stealth mode), each probe then hanging for over a
+# minute; netstat says what listens instead, on any address.
+_box_free_port() {
+  local addr="$1" i p off=$RANDOM taken=" "
+  if [[ ${BOX_CTR[0]} != podman ]]; then
+    taken+="$(_box_listening)"
   fi
-  # Only reached if the sudo above succeeded: every box script runs with `set -e`,
-  # so a failure aborts before the stamp is written and the next launch retries.
-  mkdir -p "$(dirname "$stamp")"
-  printf '%s' "$boot" >"$stamp"
+  for ((i = 0; i < BOX_BRIDGE_PORTS[1]; i++)); do
+    p=$((BOX_BRIDGE_PORTS[0] + (off + i) % BOX_BRIDGE_PORTS[1]))
+    [[ $taken == *" $p "* ]] && continue
+    if [[ ${BOX_CTR[0]} == podman ]]; then
+      (exec 3<>"/dev/tcp/$addr/$p") 2>/dev/null && continue
+    fi
+    _box_reserve_port "$p" || continue
+    BOX_FREE_PORT=$p
+    return 0
+  done
+  echo "error: no free port in $BOX_BRIDGE_PORTS-$((BOX_BRIDGE_PORTS[0] + BOX_BRIDGE_PORTS[1] - 1)) at $addr" >&2
+  exit 1
+}
+
+# Mac: the TCP ports something listens on, on any address, space-separated.
+_box_listening() {
+  netstat -an -p tcp 2>/dev/null |
+    awk '$NF == "LISTEN" { n = split($4, a, "."); printf "%s ", a[n] }'
+}
+
+# _box_reserve_port P: claim port P until this launch exits, or fail if a live
+# launch holds it, this one included. A claim is a directory (mkdir is atomic)
+# holding the owner's PID; one whose owner is gone is taken over, one with no
+# PID yet is being made.
+_box_reserve_port() {
+  local dir owner
+  dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/ports/$1"
+  mkdir -p "$(dirname "$dir")"
+  if ! mkdir "$dir" 2>/dev/null; then
+    owner="$(cat "$dir/pid" 2>/dev/null)" || true
+    [[ -n $owner ]] && ! kill -0 "$owner" 2>/dev/null || return 1
+    rm -rf "$dir"
+    mkdir "$dir" 2>/dev/null || return 1
+  fi
+  echo $$ >"$dir/pid"
+  _box_at_exit "rm -rf '$dir'"
+}
+
+# The one --network flag for all of podman's forwards, or, on a Mac, socat for
+# each forward once the box has an IP. Call last: the bridges add theirs late.
+_box_forward_args() {
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    [[ -n ${BOX_PASTA_FWD[*]-} ]] || return 0
+    local net=pasta: sep= p
+    for p in "${BOX_PASTA_FWD[@]}"; do
+      net+="$sep-T,$p"
+      sep=,
+    done
+    BOX_RUN_ARGS+=(--network "$net")
+  elif [[ -n ${BOX_MAC_FWD[*]-} ]]; then
+    _box_mac_forwards "$BOX_RUN_NAME"
+  fi
+}
+
+# _box_mac_forwards NAME: in the background, wait for the box NAME to show up in
+# `container ls` with an IP, then serve each BOX_MAC_FWD on the gateway to that
+# IP alone (socat's range=), so no other box can use them. A forward is up a
+# moment after the box; the agent takes longer than that to start. Each socat
+# writes its own PID to a file before it starts, and the exit trap reads that
+# file only after killing the watcher, so one spawned as the launch ends isn't
+# missed. A second in, the watcher checks each forward listens, and says so on
+# the terminal if one doesn't: the box would just see its connections closed.
+_box_mac_forwards() {
+  local name="$1" gw pids watcher
+  gw="$(_box_gateway)"
+  pids="$(mktemp "${TMPDIR:-/tmp}/agent-box-fwd.XXXXXX")"
+  (
+    ip=
+    for ((i = 0; i < 1200; i++)); do
+      ip="$(container ls 2>/dev/null | awk -v n="$name" \
+        '$1 == n && $5 == "running" && $6 ~ /^[0-9.]+\// { sub(/\/.*/, "", $6); print $6 }')"
+      [[ -z $ip ]] || break
+      sleep 0.1
+    done
+    [[ -n $ip ]] || {
+      echo "warning: $name showed no IP in \`container ls\` for 2 minutes; nothing is forwarded, so the box's connections to the host will be closed" >&2
+      exit 1
+    }
+    for f in "${BOX_MAC_FWD[@]}"; do
+      sh -c 'echo $$ >>"$0"; exec "$@"' "$pids" \
+        socat "TCP-LISTEN:${f%% *},bind=$gw,reuseaddr,fork,range=$ip/32" "${f#* }" 2> >(_box_socat_to) &
+    done
+    sleep 1
+    listening=" $(_box_listening)"
+    for f in "${BOX_MAC_FWD[@]}"; do
+      [[ $listening == *" ${f%% *} "* ]] ||
+        echo "warning: nothing listens on $gw:${f%% *} for ${f#* }; see $(_box_socat_log)" >&2
+    done
+  ) &
+  watcher=$!
+  _box_at_exit "kill -9 $watcher 2>/dev/null; sleep 0.1; kill -9 \$(cat '$pids') 2>/dev/null; rm -f '$pids'"
+}
+
+# Before the boxes forwarded port by port, --docker on a Mac reached the Mac at
+# a localhost DNS domain: a pf rule, loaded once per boot (the stamp records
+# which), that sends a fixed IP to all of Mac loopback, from every VM, until a
+# reboot. One loaded this boot defeats the per-port forwards, so offer to take
+# it down; without a yes, or without a terminal to ask on, stop. "c" goes
+# ahead with it up. Nothing sets it up any more, so this asks once at most.
+_box_old_alias_down() {
+  [[ ${BOX_CTR[0]} == container ]] || return 0
+  local stamp alias reply
+  stamp="$(_box_alias_stamp)"
+  [[ -f $stamp && "$(cat "$stamp")" == "$(_box_boot_time)" ]] || return 0
+  alias="$(box_knob HOST_ALIAS host.container.internal)"
+  echo "==> An older --docker set up $alias this boot: until it's taken down, any" >&2
+  echo "    box can reach every Mac loopback port there. The boxes don't use it any" >&2
+  echo "    more. To take it down:" >&2
+  echo "      sudo /sbin/pfctl -a com.apple/container -F nat && sudo container system dns delete $alias && rm '$stamp'" >&2
+  printf 'Take it down now (sudo)? [Y/n, c to continue with it up] ' >&2
+  read -r reply <"${BOX_TTY:-/dev/tty}" || reply=n
+  case $reply in
+  "" | [yY]*)
+    sudo /sbin/pfctl -a com.apple/container -F nat || {
+      echo "error: could not take $alias down" >&2
+      exit 1
+    }
+    # its resolver file only names the IP the rule sent on; gone or not, harmless
+    sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+    rm -f "$stamp"
+    echo "==> $alias taken down" >&2
+    ;;
+  [cC]*)
+    echo "==> continuing with $alias open to every box" >&2
+    ;;
+  *)
+    echo "error: not starting with $alias open; take it down or reboot" >&2
+    exit 1
+    ;;
+  esac
+}
+
+# Where the older --docker recorded the boot it set the pf rule up in.
+_box_alias_stamp() {
+  printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/host-alias.boot"
+}
+
+# The Mac's kernel boot time, in seconds.
+_box_boot_time() {
+  sysctl -n kern.boottime 2>/dev/null | sed 's/.*{ sec = \([0-9]*\).*/\1/'
 }
 
 # ------------------------------------------------------------------ exit -----
@@ -710,11 +927,15 @@ _box_at_exit() {
   BOX_AT_EXIT+=("$1")
   trap '_box_run_at_exit' EXIT
 }
+# Runs every cleanup and keeps the script's own exit status. Under set -e a
+# failing cleanup (a forwarder that already died) would otherwise end the trap
+# early, skipping the rest, and become the status.
 _box_run_at_exit() {
-  local c
+  local rc=$? c
   for c in ${BOX_AT_EXIT[@]+"${BOX_AT_EXIT[@]}"}; do
-    eval "$c"
+    eval "$c" || true
   done
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- bridge -----
@@ -724,47 +945,79 @@ _box_is_krun() {
   [[ ${BOX_CTR[0]} == podman && "$(box_runtime)" == krun ]]
 }
 
-# _box_bridge WHAT SOCK: serve the Unix socket SOCK on a free host-loopback port
-# in BOX_BRIDGE_PORTS, for a VM that can't connect to it directly, and set
-# BOX_BRIDGE_PORT. The listener lives as long as this script. Any local user can
-# connect to 127.0.0.1, which is why the range is fixed and small: one nft rule
-# can keep other users off it (tools/README.md). Keep the two in step. It sits
-# below Linux's ephemeral ports (32768+), so no outgoing connection lands there.
+# _box_bridge WHAT SOCK: serve the Unix socket SOCK on a TCP port the box can
+# reach (see host access), for a VM that can't connect to the socket directly,
+# and set BOX_BRIDGE_PORT. The listener lives as long as this script.
+#
+# Every host-side socat logs through _box_socat_to: its warnings (a refused
+# connection, a peer outside range=) would otherwise land on the agent's screen.
+#
+# podman: a free port on host loopback, served now and forwarded by pasta. Any
+# local user can connect to 127.0.0.1, which is why the range is fixed and
+# small: one nft rule can keep other users off it (tools/README.md). Keep the
+# two in step. It sits below Linux's ephemeral ports (32768+), so no outgoing
+# connection lands there. Mac: a free port on the gateway, served to this box
+# alone once it is up.
 BOX_BRIDGE_PORTS=(24100 100) # first port, count
+
+# Logs are bounded twice: each socat's share of its launch's log is capped at
+# BOX_LOG_MAX bytes (so a log holds at most that times the launch's forwards),
+# and a launch deletes all but the newest BOX_LOGS_KEPT. box-entry caps the
+# box's own the same way (its /tmp is RAM). The writers share a log line by
+# line: each prints whole lines, flushed, to a file opened for appending.
+BOX_LOG_MAX=1048576
+BOX_LOGS_KEPT=10
+
+# _box_socat_to: copy stdin (a socat's stderr) to this launch's log until it
+# has written BOX_LOG_MAX bytes, say so once, then drop the rest. It keeps
+# reading, so the socat never blocks on a full pipe or dies of SIGPIPE.
+_box_socat_to() {
+  awk -v max="$BOX_LOG_MAX" '
+    { n += length($0) + 1 }
+    n <= max { print; fflush(); next }
+    !capped { print "(log capped at " max " bytes; the rest dropped)"; fflush(); capped = 1 }
+  ' >>"$(_box_socat_log)"
+}
+
+# This launch's socat log. The first call creates it and deletes the oldest
+# launches' beyond BOX_LOGS_KEPT. $$ is the launch's PID in subshells too.
+_box_socat_log() {
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box" log old
+  log="$dir/socat-$$.log"
+  if [[ ! -e $log ]]; then
+    mkdir -p "$dir"
+    touch "$log"
+    ls -1t "$dir"/socat-*.log | tail -n +$((BOX_LOGS_KEPT + 1)) |
+      while IFS= read -r old; do rm -f "$old"; done
+  fi
+  printf '%s' "$log"
+}
 _box_bridge() {
-  local what="$1" sock="$2" hint="brew install socat" i p off=$RANDOM
+  local what="$1" sock="$2" hint="brew install socat"
   [[ ${BOX_CTR[0]} == podman ]] && hint="sudo pacman -S socat"
   command -v socat >/dev/null || {
     echo "error: $what needs socat ($hint)" >&2
     exit 1
   }
-  # Start at a random offset so concurrent launches rarely race for one port;
-  # a port is free when nothing answers on it.
-  BOX_BRIDGE_PORT=
-  for ((i = 0; i < BOX_BRIDGE_PORTS[1]; i++)); do
-    p=$((BOX_BRIDGE_PORTS[0] + (off + i) % BOX_BRIDGE_PORTS[1]))
-    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && continue
-    BOX_BRIDGE_PORT=$p
-    break
-  done
-  [[ -n $BOX_BRIDGE_PORT ]] || {
-    echo "error: $what: no free port in $BOX_BRIDGE_PORTS-$((BOX_BRIDGE_PORTS[0] + BOX_BRIDGE_PORTS[1] - 1))" >&2
-    exit 1
-  }
-  socat "TCP-LISTEN:$BOX_BRIDGE_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" &
-  # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
-  _box_at_exit "kill -9 $! 2>/dev/null"
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    _box_free_port 127.0.0.1
+    BOX_BRIDGE_PORT=$BOX_FREE_PORT
+    socat "TCP-LISTEN:$BOX_BRIDGE_PORT,bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:$sock" 2> >(_box_socat_to) &
+    # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
+    _box_at_exit "kill -9 $! 2>/dev/null"
+    BOX_PASTA_FWD+=("$BOX_BRIDGE_PORT")
+  else
+    _box_free_port "$(_box_gateway)"
+    BOX_BRIDGE_PORT=$BOX_FREE_PORT
+    BOX_MAC_FWD+=("$BOX_BRIDGE_PORT UNIX-CONNECT:$sock")
+  fi
 }
 
 # ---------------------------------------------------------------- docker -----
 box_docker_bridge() {
-  # Expose the host's Docker to the box. On a Mac, Unix sockets can't be
-  # bind-mounted into the VM, and containers can't reach the Mac at the bridge
-  # gateway IP by default. Apple's supported route is a "localhost" DNS domain:
-  # it installs a pf rule that redirects a chosen IP to the Mac's loopback, so
-  # we listen on 127.0.0.1 with socat and let the box connect by name. On Linux
-  # podman's Docker-compatible socket mounts straight in, no socat, no sudo,
-  # except under krun, whose VM gets the same socat bridge as the Mac.
+  # Expose the host's Docker to the box. A Unix socket can't be bind-mounted
+  # into a VM, so on a Mac and under krun socat serves it on a TCP port (see
+  # _box_bridge). Under podman's crun the socket mounts straight in.
   #
   # NOTE: whatever the daemon can reach on the host (colima: its mount list), the
   # agent can reach through docker.
@@ -810,12 +1063,11 @@ box_docker_bridge() {
     }
   fi
 
-  local alias
-  alias="$(box_host_alias)"
-  box_ensure_host_alias "$alias"
+  local addr
   _box_bridge "${BOX_ENV_PREFIX}_DOCKER" "$sock"
-  BOX_DOCKER_ENV+=(--env "DOCKER_HOST=tcp://$alias:$BOX_BRIDGE_PORT")
-  echo "==> docker: $sock -> tcp://$alias:$BOX_BRIDGE_PORT (this session only)" >&2
+  addr="$(_box_forward_addr)"
+  BOX_DOCKER_ENV+=(--env "DOCKER_HOST=tcp://$addr:$BOX_BRIDGE_PORT")
+  echo "==> docker: $sock -> tcp://$addr:$BOX_BRIDGE_PORT (this session only)" >&2
 }
 
 # ------------------------------------------------------------------ data -----
@@ -876,7 +1128,7 @@ _box_data_volumes() {
   [[ -n "$(_box_volume_paths)" ]] || return 0
   info="$(_box_entry_version)"
   [[ ${info:-0} -ge 5 ]] || {
-    echo "error: $BOX_IMAGE predates the box-entry persisted data needs; rerun with --rebuild" >&2
+    echo "error: $BOX_IMAGE predates the box-entry persisted data needs; rerun with --build-only" >&2
     exit 1
   }
   prefix="$(_box_data_prefix)"
@@ -1017,11 +1269,6 @@ _box_runtime_args() {
   esac
   BOX_RUN_ARGS+=(--annotation "krun.cpus=$(box_knob CPUS 4)"
     --annotation "krun.ram_mib=$mem")
-  # The ssh/docker bridges listen on host loopback. Map it in only when one is
-  # on: the guest then reaches every host 127.0.0.1 port, not just theirs.
-  if [[ -n "$(box_knob SSH)" || "$(box_knob DOCKER 0)" == 1 ]]; then
-    BOX_RUN_ARGS+=(--network "pasta:--map-host-loopback,$BOX_PASTA_LOOPBACK")
-  fi
   echo "==> runtime: krun (${mem} MiB, $(box_knob CPUS 4) vCPUs)" >&2
 }
 
@@ -1067,10 +1314,11 @@ box_run_args() {
   _box_profile
 
   mkdir -p "$BOX_HOME"
+  # trailing '-' so GNU tr doesn't read "_.-\n" as a (reversed) range
+  BOX_RUN_NAME="$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.\n-' '-')-$$"
   BOX_RUN_ARGS=(
     -i --rm
-    # trailing '-' so GNU tr doesn't read "_.-\n" as a (reversed) range
-    --name "$BOX_NAME_PREFIX-$(basename "$PWD" | tr -c 'a-zA-Z0-9_.\n-' '-')-$$"
+    --name "$BOX_RUN_NAME"
     --volume "$PWD:$PWD"
     --workdir "$PWD"
     --volume "$BOX_HOME:/root"
@@ -1099,6 +1347,7 @@ box_run_args() {
   )
   _box_git_dir_volume
   _box_runtime_args
+  _box_host_port_args
   _box_data_volumes
   if [[ -n "$(box_knob SSH)" ]]; then
     if [[ ${BOX_CTR[0]} == podman ]]; then
@@ -1108,12 +1357,13 @@ box_run_args() {
         exit 1
       }
       if _box_is_krun; then
-        # Over host loopback instead; box-entry makes it a socket again in /tmp.
+        # Over a TCP port instead (_box_bridge); box-entry makes it a socket
+        # again in /tmp.
         _box_bridge --ssh "$SSH_AUTH_SOCK"
         BOX_ENTRY=1
-        BOX_RUN_ARGS+=(--env "BOX_SSH_AGENT_TCP=$(box_host_alias):$BOX_BRIDGE_PORT"
+        BOX_RUN_ARGS+=(--env "BOX_SSH_AGENT_TCP=127.0.0.1:$BOX_BRIDGE_PORT"
           --env SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
-        echo "==> ssh: agent -> tcp://$(box_host_alias):$BOX_BRIDGE_PORT -> /tmp/ssh-agent.sock" >&2
+        echo "==> ssh: agent -> tcp://127.0.0.1:$BOX_BRIDGE_PORT -> /tmp/ssh-agent.sock" >&2
       else
         BOX_RUN_ARGS+=(--volume "$SSH_AUTH_SOCK:/ssh-agent.sock"
           --env SSH_AUTH_SOCK=/ssh-agent.sock)
@@ -1122,6 +1372,7 @@ box_run_args() {
       BOX_RUN_ARGS+=(--ssh)
     fi
   fi
+  _box_forward_args
 }
 
 # Launch the image under whatever runtime the host has. Everything else about
@@ -1147,7 +1398,7 @@ box_run() {
   done
   info="$(_box_entry_version)"
   if [[ ${info:-0} -lt 2 && ${BOX_ENTRY:-0} -eq 1 ]]; then
-    echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --rebuild" >&2
+    echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --build-only" >&2
     exit 1
   fi
   [[ ${BOX_SHELL:-0} -eq 1 ]] || {

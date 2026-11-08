@@ -11,7 +11,7 @@ case $1 in
 info) echo "${FAKE_ROOTLESS:-true}" ;;
 image)
   # the image exists; with --format, its agent-box.entry label
-  [[ $2 == inspect && $* == *--format* ]] && echo 5
+  [[ $2 == inspect && $* == *--format* ]] && echo "${FAKE_ENTRY:-7}"
   ;;
 run)
   shift

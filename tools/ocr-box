@@ -12,6 +12,8 @@
 #                                host's gh token along (same as OCR_BOX_SSH=1)
 #   ocr-box --docker [args...]   let the agent use the host's Docker / podman
 #                                (same as OCR_BOX_DOCKER=1)
+#   ocr-box --host-port <port>   let the agent reach the host's 127.0.0.1:<port>
+#                                (same as OCR_BOX_HOST_PORT)
 #   ocr-box --profile=NAME       read ~/.box.NAME.env (lines like
 #                                `export SOME_VAR=SOME_VAL`) and pass its
 #                                variables into the box (same as OCR_BOX_PROFILE; or --profile NAME)
@@ -57,10 +59,9 @@
 #   OCR_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
 #   OCR_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
 #                        and, so `gh` works too, pass `gh auth token` from the host
+#   OCR_BOX_HOST_PORT    host port(s) the box may reach (same as --host-port)
 #   OCR_BOX_PROFILE      name of a profile: ~/.box.NAME.env is read and its
 #                        variables passed into the box (same as --profile NAME)
-#   OCR_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
-#   OCR_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
 #   OCR_BOX_CPUS / OCR_BOX_MEMORY  VM sizing (default 4 / 4G)
 set -euo pipefail
 

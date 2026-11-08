@@ -11,6 +11,8 @@
 #                              host's gh token along (same as PI_BOX_SSH=1)
 #   pi-box --docker [args...]  let the agent use the host's Docker / podman
 #                              (same as PI_BOX_DOCKER=1)
+#   pi-box --host-port <port>  let the agent reach the host's 127.0.0.1:<port>
+#                              (same as PI_BOX_HOST_PORT)
 #   pi-box --search [args...]  enable Tavily web search / fetch tools
 #                              (same as PI_BOX_SEARCH=1; needs TAVILY_API_KEY)
 #   pi-box --profile=NAME      read ~/.box.NAME.env (lines like
@@ -57,12 +59,10 @@
 #   PI_BOX_PROFILE      name of a profile: ~/.box.NAME.env is read and its
 #                       variables passed into the box (same as --profile NAME)
 #   PI_BOX_DOCKER       1: let the agent use your Mac's Docker engine. Bridges your
-#                       Docker socket to TCP with socat and sets up Apple's localhost
-#                       DNS domain for container->Mac traffic (sudo, once per boot).
+#                       Docker socket to a TCP port only this box can reach (socat).
 #                       The docker CLI is always in the image; this is per launch.
 #   PI_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
-#   PI_BOX_HOST_ALIAS   the localhost domain name (default host.container.internal)
-#   PI_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
+#   PI_BOX_HOST_PORT    host port(s) the box may reach (same as --host-port)
 #   PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION  passed through for pi-anthropic-oauth
 set -euo pipefail
 

@@ -7,11 +7,19 @@ fi
 echo "container $*" >>"$FAKE_DIR/calls"
 case $1 in
 image)
-  [[ $2 == inspect ]] && echo '[{"config":{"labels":{"agent-box.entry":"5"}}}]'
+  [[ $2 == inspect ]] && echo "[{\"config\":{\"labels\":{\"agent-box.entry\":\"${FAKE_ENTRY:-7}\"}}}]"
+  ;;
+ls)
+  # the box `run` started, while it runs, at $FAKE_BOX_IP
+  echo "ID  IMAGE  OS  ARCH  STATE  IP  CPUS  MEMORY  STARTED"
+  name="$(awk 'p { print; exit } $0 == "--name" { p = 1 }' "$FAKE_DIR/run.args" 2>/dev/null)"
+  [[ -z $name ]] || echo "$name  box:latest  linux  arm64  running  ${FAKE_BOX_IP:-192.168.64.21}/24  4  4096 MB  2026-11-08T17:47:10Z"
   ;;
 run)
   shift
   printf '%s\n' "$@" >"$FAKE_DIR/run.args"
+  # a box that stays up a moment, for what the launch starts beside it
+  [[ -z ${FAKE_RUN_SLEEP-} ]] || sleep "$FAKE_RUN_SLEEP"
   ;;
 esac
 exit 0

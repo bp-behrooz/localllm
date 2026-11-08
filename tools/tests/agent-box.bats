@@ -164,6 +164,43 @@ wsl_note() {
   [[ $CL_BOX_SSH -eq 1 && $BOX_SHELL -eq 0 && ${BOX_ARGS[*]} == --shell ]]
 }
 
+@test "flags: --host-port PORT and --host-port=PORT" {
+  load_lib
+  box_parse_args --host-port 1234
+  [[ ${BOX_ARGS[*]} == "" && ${BOX_HOST_PORTS[*]} == 1234 ]]
+  box_parse_args --host-port=1234
+  [[ ${BOX_HOST_PORTS[*]} == 1234 ]]
+}
+
+@test "flags: bad --host-port ports are refused" {
+  load_lib
+  local bad
+  for bad in nope 0 99999 5432,x ""; do
+    run box_parse_args --host-port "$bad"
+    [[ $status -ne 0 && $output == *"--host-port"* ]]
+  done
+  run box_parse_args --host-port
+  [[ $status -ne 0 && $output == *"requires a port"* ]]
+}
+
+@test "flags: repeated and comma-separated --host-port, without repeats" {
+  load_lib
+  box_parse_args --host-port=5432 --host-port=6379,05432
+  [[ ${BOX_HOST_PORTS[*]} == "5432 6379" ]]
+}
+
+@test "flags: the HOST_PORT knob, and the flag over it" {
+  load_lib
+  CL_BOX_HOST_PORT=5432,6379
+  box_parse_args
+  [[ ${BOX_HOST_PORTS[*]} == "5432 6379" ]]
+  box_parse_args --host-port 7000
+  [[ ${BOX_HOST_PORTS[*]} == 7000 ]]
+  CL_BOX_HOST_PORT=nope
+  run box_parse_args
+  [[ $status -ne 0 && $output == *"CL_BOX_HOST_PORT 'nope'"* ]]
+}
+
 # ------------------------------------------------------------------- data -----
 @test "data: each worktree gets its own volumes" {
   make_repo main
@@ -242,6 +279,296 @@ wsl_note() {
   export CL_BOX_RUNTIME=crun FAKE_ROOTLESS=false
   run_box --shell -c true
   [[ $status -ne 0 && $output == *"not rootless"* ]]
+}
+
+# this host's socat/netstat stand-ins. socat says what it would serve, warns on
+# stderr as the real one does, and stays up a moment; unless FAKE_SOCAT_DEAD is
+# set, it notes the port it listens on. netstat lists those, and $FAKE_LISTEN
+# ("addr.port" words), the way macOS does.
+fake_mac_tools() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat >"$BATS_TEST_TMPDIR/bin/socat" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$FAKE_DIR/socat.calls"
+case $1 in TCP-LISTEN:*)
+  l=${1#TCP-LISTEN:}
+  [ -n "${FAKE_SOCAT_DEAD-}" ] || echo "192.168.64.1.${l%%,*}" >>"$FAKE_DIR/listening" ;;
+esac
+echo "socat W refusing connection due to range option" >&2
+[ -n "${FAKE_SOCAT_DEAD-}" ] || sleep 3
+EOF
+  cat >"$BATS_TEST_TMPDIR/bin/netstat" <<'EOF'
+#!/bin/sh
+for a in $FAKE_LISTEN $(cat "$FAKE_DIR/listening" 2>/dev/null); do
+  echo "tcp4       0      0  $a      *.*      LISTEN"
+done
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/"*
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# a Unix socket at $1, as an ssh-agent or Docker would leave
+make_sock() {
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"
+}
+
+@test "host-port: only the listed ports are forwarded, under krun and crun" {
+  load_lib
+  BOX_RUN_ARGS=()
+  BOX_HOST_PORTS=(5432 6379)
+  _box_runtime_args
+  run _box_host_port_args
+  [[ $output == *"127.0.0.1:5432,6379 forwarded to the host (only those)"* ]]
+  _box_host_port_args 2>/dev/null
+  _box_forward_args
+  [[ " ${BOX_RUN_ARGS[*]} " == *" --network pasta:-T,5432,-T,6379 "* ]]
+  [[ ${BOX_RUN_ARGS[*]} != *map-host-loopback* ]]
+  as_wsl
+  load_lib
+  BOX_RUN_ARGS=()
+  BOX_PASTA_FWD=()
+  _box_runtime_args
+  _box_host_port_args 2>/dev/null
+  _box_forward_args
+  [[ " ${BOX_RUN_ARGS[*]} " == *" --network pasta:-T,5432,-T,6379 "* ]]
+}
+
+@test "host-port: a whole launch passes just the port forwards" {
+  export CL_BOX_RUNTIME=crun
+  run_box --host-port=5432,6379 --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --network pasta:-T,5432,-T,6379
+  run grep -q map-host-loopback "$FAKE_DIR/run.args"
+  [[ $status -ne 0 ]]
+}
+
+@test "bridges: a free port is one nothing answers on and no live launch reserved" {
+  load_lib
+  # four ports: the first listened on, the second reserved by a live launch,
+  # the third by one that is gone
+  python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()
+print(s.getsockname()[1], flush=True); time.sleep(30)' >"$BATS_TEST_TMPDIR/port" &
+  local listener=$!
+  until [[ -s "$BATS_TEST_TMPDIR/port" ]]; do sleep 0.05; done
+  local busy ports="$XDG_STATE_HOME/agent-box/ports"
+  busy="$(cat "$BATS_TEST_TMPDIR/port")"
+  BOX_BRIDGE_PORTS=("$busy" 4)
+  sleep 30 &
+  local alive=$!
+  mkdir -p "$ports/$((busy + 1))" "$ports/$((busy + 2))"
+  echo "$alive" >"$ports/$((busy + 1))/pid"
+  echo 4999999 >"$ports/$((busy + 2))/pid"
+  local got=()
+  _box_free_port 127.0.0.1
+  got+=("$BOX_FREE_PORT")
+  _box_free_port 127.0.0.1
+  got+=("$BOX_FREE_PORT")
+  # in either order, by the random start
+  [[ " ${got[*]} " == *" $((busy + 2)) "* && " ${got[*]} " == *" $((busy + 3)) "* ]]
+  [[ $(cat "$ports/$((busy + 2))/pid") == $$ && $(cat "$ports/$((busy + 3))/pid") == $$ ]]
+  [[ $(cat "$ports/$((busy + 1))/pid") == "$alive" ]]
+  run _box_free_port 127.0.0.1
+  [[ $status -ne 0 && $output == *"no free port"* ]]
+  kill "$listener" "$alive"
+}
+
+@test "bridges: a Mac asks netstat what listens, and never probes the gateway" {
+  as_mac
+  fake_mac_tools
+  load_lib
+  # here 192.168.64.1 may be a real host: a probe would hang for minutes
+  export FAKE_LISTEN="192.168.64.1.24100 *.24101 127.0.0.1.24102"
+  BOX_BRIDGE_PORTS=(24100 4)
+  _box_free_port 192.168.64.1
+  [[ $BOX_FREE_PORT == 24103 ]]
+  # now this launch's
+  run _box_free_port 192.168.64.1
+  [[ $status -ne 0 && $output == *"no free port"* ]]
+}
+
+@test "bridges: under krun, --ssh and --docker are port forwards too, beside --host-port" {
+  fake_mac_tools # only for its socat
+  make_sock "$BATS_TEST_TMPDIR/agent.sock"
+  make_sock "$BATS_TEST_TMPDIR/docker.sock"
+  load_lib
+  SSH_AUTH_SOCK="$BATS_TEST_TMPDIR/agent.sock"
+  CL_BOX_SSH=1 CL_BOX_DOCKER=1 CL_BOX_DOCKER_SOCK="$BATS_TEST_TMPDIR/docker.sock"
+  BOX_HOST_PORTS=(5432)
+  box_docker_bridge 2>/dev/null
+  local docker=$BOX_BRIDGE_PORT
+  box_run_args 2>/dev/null
+  local ssh=$BOX_BRIDGE_PORT
+  [[ $docker != "$ssh" ]]
+  [[ " ${BOX_RUN_ARGS[*]} " == *" DOCKER_HOST=tcp://127.0.0.1:$docker "* ]]
+  [[ " ${BOX_RUN_ARGS[*]} " == *" BOX_SSH_AGENT_TCP=127.0.0.1:$ssh "* ]]
+  [[ " ${BOX_RUN_ARGS[*]} " == *" --network pasta:-T,$docker,-T,5432,-T,$ssh "* ]]
+  [[ $(grep -o -- --network <<<"${BOX_RUN_ARGS[*]}" | wc -l) -eq 1 ]]
+  [[ ${BOX_RUN_ARGS[*]} != *map-host-loopback* && ${BOX_RUN_ARGS[*]} != *169.254* ]]
+}
+
+@test "bridges: a Mac serves --docker and --host-port on the gateway, to this box alone" {
+  as_mac
+  fake_mac_tools
+  make_sock "$BATS_TEST_TMPDIR/docker.sock"
+  export CL_BOX_DOCKER_SOCK="$BATS_TEST_TMPDIR/docker.sock" FAKE_BOX_IP=192.168.64.31
+  FAKE_RUN_SLEEP=3 run_box --docker --host-port=5432,6379 --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $output == *"127.0.0.1:5432,6379 forwarded to the Mac (only those, only this box)"* ]]
+  [[ $output != *"nothing listens"* ]]
+  local docker pg redis
+  docker="$(sed -n 's#^DOCKER_HOST=tcp://192.168.64.1:##p' "$FAKE_DIR/run.args")"
+  pg="$(sed -n 's#^BOX_HOST_PORTS=5432:\([0-9]*\) .*#\1#p' "$FAKE_DIR/run.args")"
+  redis="$(sed -n 's#^BOX_HOST_PORTS=.* 6379:##p' "$FAKE_DIR/run.args")"
+  [[ -n $docker && -n $pg && -n $redis ]]
+  [[ $(printf '%s\n' "$docker" "$pg" "$redis" | sort -u | wc -l) -eq 3 ]]
+  run_has --env BOX_HOST_GATEWAY=192.168.64.1
+  local only="bind=192.168.64.1,reuseaddr,fork,range=192.168.64.31/32"
+  grep -qxF "TCP-LISTEN:$docker,$only UNIX-CONNECT:$CL_BOX_DOCKER_SOCK" "$FAKE_DIR/socat.calls"
+  grep -qxF "TCP-LISTEN:$pg,$only TCP:127.0.0.1:5432" "$FAKE_DIR/socat.calls"
+  grep -qxF "TCP-LISTEN:$redis,$only TCP:127.0.0.1:6379" "$FAKE_DIR/socat.calls"
+  # socat's warnings go to this launch's log, not the agent's screen
+  [[ $output != *refusing* ]]
+  [[ $(cat "$XDG_STATE_HOME"/agent-box/socat-*.log | grep -c refusing) -eq 3 ]]
+  run grep -q 'sudo\|dns create\|pfctl' "$FAKE_DIR/calls"
+  [[ $status -ne 0 ]]
+}
+
+@test "bridges: a Mac says so on the terminal when a forward doesn't listen" {
+  as_mac
+  fake_mac_tools
+  export FAKE_SOCAT_DEAD=1
+  FAKE_RUN_SLEEP=3 run_box --host-port=5432 --shell -c true
+  [[ $status -eq 0 ]]
+  local pg
+  pg="$(sed -n 's#^BOX_HOST_PORTS=5432:##p' "$FAKE_DIR/run.args")"
+  [[ $output == *"warning: nothing listens on 192.168.64.1:$pg for TCP:127.0.0.1:5432; see "*"/agent-box/socat-"* ]]
+}
+
+@test "logs: each launch's is capped, and only the newest are kept" {
+  load_lib
+  BOX_LOG_MAX=300 BOX_LOGS_KEPT=3
+  mkdir -p "$XDG_STATE_HOME/agent-box"
+  local i
+  # older the higher i, and older than any clock; touch -t, as BSD touch has no
+  # -d "-1 hour"
+  for i in 1 2 3 4 5; do
+    touch -t "20000101$(printf '%02d' $((10 - i)))00" "$XDG_STATE_HOME/agent-box/socat-old$i.log"
+  done
+  for i in $(seq 1 50); do echo "socat W refusing connection number $i"; done | _box_socat_to
+  local log
+  log="$(_box_socat_log)"
+  [[ $(wc -c <"$log") -le 350 && $(tail -1 "$log") == "(log capped at 300 bytes; the rest dropped)" ]]
+  [[ $(grep -c '^(log capped' "$log") -eq 1 ]]
+  [[ $(ls "$XDG_STATE_HOME"/agent-box/socat-*.log | wc -l) -eq 3 ]]
+  [[ -e $log && -e "$XDG_STATE_HOME/agent-box/socat-old1.log" && ! -e "$XDG_STATE_HOME/agent-box/socat-old3.log" ]]
+}
+
+@test "bridges: a Mac forwards nothing to a box that never shows an IP" {
+  as_mac
+  fake_mac_tools
+  load_lib
+  container() { :; }
+  sleep() { :; }
+  BOX_MAC_FWD=("24100 TCP:127.0.0.1:5432")
+  # not under `run`: the watcher has to be this shell's child for `wait`; the
+  # socats it would start aren't, so give them a moment (sleep is stubbed)
+  _box_mac_forwards cl-nope-1 2>"$BATS_TEST_TMPDIR/err"
+  wait
+  command sleep 0.5
+  [[ ! -e "$FAKE_DIR/socat.calls" ]]
+  grep -q "cl-nope-1 showed no IP" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "bridges: a Mac launch's exit kills every forward the watcher started" {
+  as_mac
+  fake_mac_tools
+  load_lib
+  container() { echo "cl-x-1  box  linux  arm64  running  192.168.64.31/24  4  4096 MB  now"; }
+  BOX_MAC_FWD=("24100 TCP:127.0.0.1:5432" "24101 TCP:127.0.0.1:6379")
+  _box_mac_forwards cl-x-1 2>/dev/null
+  until [[ $(cat "$FAKE_DIR/socat.calls" 2>/dev/null | wc -l) -eq 2 ]]; do sleep 0.05; done
+  _box_run_at_exit
+  run pgrep -f "$BATS_TEST_TMPDIR/bin/socat"
+  [[ $status -ne 0 ]]
+}
+
+@test "host-port: a Mac image without the relay is told to rebuild" {
+  as_mac
+  FAKE_ENTRY=6 run_box --host-port 5432 --shell -c true
+  [[ $status -ne 0 && $output == *"rerun with --build-only"* ]]
+}
+
+# An older --docker's pf route to all of Mac loopback, up this boot; sudo only
+# says what it'd run
+alias_up() {
+  as_mac
+  load_lib
+  sudo() { echo "sudo $*" >>"$FAKE_DIR/sudo.calls"; }
+  _box_boot_time() { echo 1234; }
+  mkdir -p "$(dirname "$(_box_alias_stamp)")"
+  echo 1234 >"$(_box_alias_stamp)"
+}
+
+@test "old alias: a Mac with the old route up takes it down on yes" {
+  alias_up
+  local answer
+  for answer in y ""; do
+    echo 1234 >"$(_box_alias_stamp)"
+    : >"$FAKE_DIR/sudo.calls"
+    BOX_TTY=<(echo "$answer") run _box_old_alias_down
+    [[ $status -eq 0 && $output == *"any"*"box can reach every Mac loopback port"*"taken down"* ]]
+    [[ $(cat "$FAKE_DIR/sudo.calls") == "sudo /sbin/pfctl -a com.apple/container -F nat
+sudo container system dns delete host.container.internal" ]]
+    [[ ! -e "$(_box_alias_stamp)" ]]
+  done
+}
+
+@test "old alias: a Mac with the old route up stops on no, or with no terminal" {
+  alias_up
+  BOX_TTY=<(echo n) run _box_old_alias_down
+  [[ $status -ne 0 && $output == *"not starting with host.container.internal open"* ]]
+  BOX_TTY=/nonexistent/tty run _box_old_alias_down
+  [[ $status -ne 0 && $output == *"sudo /sbin/pfctl -a com.apple/container -F nat"* ]]
+  [[ ! -e "$FAKE_DIR/sudo.calls" && -e "$(_box_alias_stamp)" ]]
+}
+
+@test "old alias: a Mac with the old route up goes ahead on c" {
+  alias_up
+  BOX_TTY=<(echo c) run _box_old_alias_down
+  [[ $status -eq 0 && $output == *"continuing with host.container.internal open"* ]]
+  [[ ! -e "$FAKE_DIR/sudo.calls" && -e "$(_box_alias_stamp)" ]]
+}
+
+@test "old alias: asked before the build on any Mac launch, not for --build-only" {
+  alias_up
+  BOX_TTY=<(echo n) run box_require_runtime
+  [[ $status -ne 0 && $output == *"An older --docker set up"* ]]
+  BUILD_ONLY=1 BOX_TTY=/nonexistent/tty run box_require_runtime
+  [[ $status -eq 0 && $output != *"An older"* ]]
+}
+
+@test "old alias: no question when it isn't up, or on podman" {
+  alias_up
+  echo 999 >"$(_box_alias_stamp)"
+  BOX_TTY=/nonexistent/tty run _box_old_alias_down
+  [[ $status -eq 0 && -z $output ]]
+  as_linux
+  load_lib
+  _box_boot_time() { echo 1234; }
+  echo 1234 >"$(_box_alias_stamp)"
+  BOX_TTY=/nonexistent/tty run _box_old_alias_down
+  [[ $status -eq 0 && -z $output ]]
+}
+
+@test "host-port: no network flag without it or a bridge" {
+  load_lib
+  BOX_RUN_ARGS=()
+  BOX_HOST_PORTS=()
+  _box_runtime_args
+  _box_host_port_args
+  _box_forward_args
+  [[ ${BOX_RUN_ARGS[*]:-} != *"--network"* ]]
 }
 
 # ---------------------------------------------------------------- version ----

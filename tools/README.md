@@ -75,15 +75,16 @@ real Docker socket if you need them). `--ssh` forwards your ssh-agent. `--gh`
 passes the repo's token from `box-gh-token set`; `--gh=host` passes your own
 `gh auth token` for that run only.
 
-A Unix socket can't cross a VM boundary, so `socat` serves each one on a free
-host-loopback port (24100-24199) for the session. The box reaches it at
-`169.254.1.3`, which pasta maps to host loopback (a plain container just
-bind-mounts the sockets). Two consequences:
+A Unix socket can't cross a VM boundary, so under krun and on a Mac `socat`
+serves each one on a free port (24100-24199) for the session, forwarded to
+that box alone the way `--host-port` forwards a port (see [Reaching the
+host](#reaching-the-host)); a plain container just bind-mounts the sockets.
+Neither flag gives the box the rest of the host's loopback.
 
-- With either flag on, the box can reach **every** port on host `127.0.0.1`.
-- Any local user can connect to the bridge ports while the box runs. To keep
-  other users out, allow only your uid and your subuid range (podman's pasta
-  connects as `nobody` in your user namespace, i.e. a subuid):
+On Linux the bridge ports sit on host loopback, where any local user can
+connect to them while the box runs. To keep other users out, allow only your
+uid and your subuid range (podman's pasta connects as `nobody` in your user
+namespace, i.e. a subuid):
 
 ```sh
 subuids=$(awk -F: -v u="$USER" '$1 == u { print $2 "-" $2 + $3 - 1 }' /etc/subuid)
@@ -119,6 +120,35 @@ EOF
 sudo systemctl enable --now agentbox-nft
 ```
 
+## Reaching the host
+
+`--host-port <port>` (env: `<BOX>_HOST_PORT`) lets the box reach services on
+the host's loopback — e.g. a Postgres and a Redis next to the pool — and only
+those ports:
+
+```sh
+pi-box --host-port=5432 --host-port=6379
+# or: pi-box --host-port=5432,6379
+```
+
+The agent connects to `127.0.0.1:5432` as if Postgres ran in the box, and
+nothing else on the host's loopback is reachable. Under podman, pasta forwards
+each listed port; on a Mac, socat does, on a free port of the VM network's
+gateway (`192.168.64.1`, or `<BOX>_HOST_GATEWAY`) that accepts only this
+box's IP, which needs `brew install socat` and a current image (the box says
+when it needs `--build-only`). There the forwards start a moment after the box
+does, and a forwarded port whose service is down accepts a connection and then
+closes it rather than refusing it. A service in the box can't listen on a
+forwarded port. socat logs out of the agent's way, to
+`~/.local/state/agent-box/socat-<pid>.log` on the host (one per launch, the
+10 newest kept) and to `/tmp/box-entry-socat.log` in the box, with each
+forward's share of a log capped at 1 MiB.
+
+On a Mac, `--docker` used to reach the Mac through a pf rule that gave every
+box all of the Mac's loopback until a reboot. While one set up this boot is
+still loaded, every launch offers to take it down (sudo) and won't start
+without an answer.
+
 ## Customizing a box
 
 Cheapest first:
@@ -150,10 +180,11 @@ does not (it writes to `/usr`).
 | `*_BOX_VERSION` | npm version of the agent (not agy-box; `--rebuild` updates it) |
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM size (default 4 / 4G; krun wants `M` or `G`) |
 | `*_BOX_SSH`, `*_BOX_DOCKER`, `*_BOX_SEARCH`, `*_BOX_PROFILE` | same as the flags |
+| `*_BOX_HOST_PORT` | same as `--host-port` |
 | `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`, `crun` on WSL2; `crun` for no VM) |
 | `*_BOX_PROJECT` | name the project for persisted service data (default: git worktree or `$PWD`) |
 | `*_BOX_DOCKER_SOCK` | Docker socket (default: colima etc. on a Mac, your podman socket on Linux) |
-| `*_BOX_HOST_ALIAS`, `*_BOX_HOST_ALIAS_IP` | Mac: the host-loopback DNS name and IP |
+| `*_BOX_HOST_GATEWAY` | Mac: the VM network's gateway the forwards listen on (default `192.168.64.1`) |
 
 Each script's header lists its own extras (models, approval prompts, ...).
 pi-box, opencode-box and ocr-box also read `LOCAL_LLM_URL` and
@@ -229,11 +260,14 @@ To change the shared base for everyone, edit `box_dockerfile_base` in
 
 ## Flags
 
-Shared: `--rebuild`, `--build-only`, `--ssh`, `--gh[=host]`, `--docker`, `--search`,
-`--profile NAME`, `--clean`, `--clean-all`, `--clean-data`, `--shell`. pi-box, opencode-box
-and ocr-box add `--sync` / `--sync-only` to refresh the model list from the
-server. Everything else goes to the agent.
+Shared: `--rebuild`, `--build-only`, `--ssh`, `--gh[=host]`, `--docker`,
+`--host-port <port>`, `--search`, `--profile NAME`, `--clean`, `--clean-all`,
+`--clean-data`, `--shell`. pi-box, opencode-box and ocr-box add `--sync` /
+`--sync-only` to refresh the model list from the server. Everything else goes
+to the agent.
 
+- `--host-port <port>` lets the box reach just that port on the host's loopback;
+  see [Reaching the host](#reaching-the-host).
 - `--profile NAME` passes the variables from `~/.box.NAME.env` (lines like
   `export FOO=bar`) into the box. `~/.box.default.env` is always read if it
   exists, with `NAME` on top. Profiles are shared by every box and kept out of
@@ -251,16 +285,6 @@ server. Everything else goes to the agent.
   agent's own major version bump (OpenCode 1.x → 2.0 changed the plugin and
   config formats) is one command — `opencode-box --clean-all --rebuild`, which
   seeds a fresh config on the way up.
-
-## Mac: the once-per-boot sudo
-
-The first launch after a boot sets up the host-loopback DNS name (an
-`/etc/resolver` file and a `pf` rule), which needs `sudo`. To skip the prompt:
-
-```sh
-echo "$USER ALL=(root) NOPASSWD: /sbin/pfctl -a com.apple/container -f /etc/pf.anchors/com.apple.container" | sudo tee /etc/sudoers.d/container-pfctl
-sudo visudo -c -f /etc/sudoers.d/container-pfctl   # if it errors, rm the file
-```
 
 ## Two boxes at once
 

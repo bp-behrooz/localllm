@@ -11,6 +11,8 @@
 #                                    host's gh token along (same as OC_BOX_SSH=1)
 #   opencode-box --docker [args...]  let the agent use the host's Docker / podman
 #                                    (same as OC_BOX_DOCKER=1)
+#   opencode-box --host-port <port>  let the agent reach the host's 127.0.0.1:<port>
+#                                    (same as OC_BOX_HOST_PORT)
 #   opencode-box --search [args...]  enable web search (OpenCode's built-in
 #                                    websearch tool, Tavily provider; without it
 #                                    the tool is disabled, so 2.0 never asks)
@@ -61,10 +63,9 @@
 #   OC_BOX_DOCKER_SOCK  path to the Docker socket (auto-detected; colima first)
 #   OC_BOX_SSH          1 to forward your ssh-agent into the box (container run --ssh)
 #                       and, so `gh` works too, pass `gh auth token` from the host
+#   OC_BOX_HOST_PORT    host port(s) the box may reach (same as --host-port)
 #   OC_BOX_PROFILE      name of a profile: ~/.box.NAME.env is read and its
 #                       variables passed into the box (same as --profile NAME)
-#   OC_BOX_HOST_ALIAS   localhost domain name (default host.container.internal)
-#   OC_BOX_HOST_ALIAS_IP the IP the domain maps to (default 203.0.113.113)
 #   OC_BOX_CPUS / OC_BOX_MEMORY  VM sizing (default 4 / 4G)
 set -euo pipefail
 

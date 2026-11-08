@@ -32,6 +32,18 @@ load_lib() {
   BOX_KEEP=(.claude)
   # shellcheck source=../agent-box-lib.bash
   source "$TOOLS/agent-box-lib.bash"
+  # The lib queues cleanups behind its own EXIT trap, which would replace
+  # bats' and make a failing test vanish from the report ("Executed 0 instead
+  # of expected 1 tests") instead of failing. Queue them only; teardown runs
+  # them.
+  _box_at_exit() { BOX_AT_EXIT+=("$1"); }
+}
+
+teardown() {
+  # in an if: _box_run_at_exit returns the status it was called with
+  if declare -F _box_run_at_exit >/dev/null; then
+    _box_run_at_exit
+  fi
 }
 
 # claude-box against the stubs; what it passed to `run` is in run.args.
