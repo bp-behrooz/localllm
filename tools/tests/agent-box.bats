@@ -520,6 +520,7 @@ alias_up() {
     [[ $status -eq 0 && $output == *"any"*"box can reach every Mac loopback port"*"taken down"* ]]
     [[ $(cat "$FAKE_DIR/sudo.calls") == "sudo /sbin/pfctl -a com.apple/container -F nat
 sudo container system dns delete host.container.internal" ]]
+    grep -qx 'container system stop' "$FAKE_DIR/calls" && grep -qx 'container system start' "$FAKE_DIR/calls"
     [[ ! -e "$(_box_alias_stamp)" ]]
   done
 }

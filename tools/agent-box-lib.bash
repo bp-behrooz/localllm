@@ -884,18 +884,24 @@ _box_old_alias_down() {
   alias="$(box_knob HOST_ALIAS host.container.internal)"
   echo "==> An older --docker set up $alias this boot: until it's taken down, any" >&2
   echo "    box can reach every Mac loopback port there. The boxes don't use it any" >&2
-  echo "    more. To take it down:" >&2
-  echo "      sudo /sbin/pfctl -a com.apple/container -F nat && sudo container system dns delete $alias && rm '$stamp'" >&2
+  echo "    more. Taking it down restarts the container system, which stops every" >&2
+  echo "    running box. To do it yourself:" >&2
+  echo "      sudo /sbin/pfctl -a com.apple/container -F nat && sudo container system dns delete $alias && container system stop && container system start && rm '$stamp'" >&2
   printf 'Take it down now (sudo)? [Y/n, c to continue with it up] ' >&2
   read -r reply <"${BOX_TTY:-/dev/tty}" || reply=n
   case $reply in
   "" | [yY]*)
-    sudo /sbin/pfctl -a com.apple/container -F nat || {
+    # The anchor holds only the alias's rdr, so flushing it is safe. dns delete
+    # leaves every box offline until the container system restarts.
+    local out
+    out=$(sudo /sbin/pfctl -a com.apple/container -F nat 2>&1) || {
+      printf '%s\n' "$out" >&2
       echo "error: could not take $alias down" >&2
       exit 1
     }
-    # its resolver file only names the IP the rule sent on; gone or not, harmless
     sudo container system dns delete "$alias" >/dev/null 2>&1 || true
+    echo "==> restarting the container system (stops running boxes)" >&2
+    container system stop && container system start
     rm -f "$stamp"
     echo "==> $alias taken down" >&2
     ;;

@@ -147,7 +147,8 @@ forward's share of a log capped at 1 MiB.
 On a Mac, `--docker` used to reach the Mac through a pf rule that gave every
 box all of the Mac's loopback until a reboot. While one set up this boot is
 still loaded, every launch offers to take it down (sudo) and won't start
-without an answer.
+without an answer. Taking it down restarts the container system, which stops
+every running box.
 
 ## Customizing a box
 
