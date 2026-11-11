@@ -43,8 +43,9 @@ RDNA4 kernels and speculative decoding:
   About 229 tok/s on one R9700, far quicker than the 27B dense, at KL 0.064
   to its bf16 original, so below the 27B FP8 in fidelity.
 - `gemma4-heretic`: Gemma 4 31B heretic-ara (refusals removed) with a GPTQ
-  int4 trunk, int8 activations and MTP, 64K context at 8 sequences
-  (upstream's flags; 256K fits at `--max-num-seqs 2`).
+  int4 trunk, int8 activations and MTP, 256K context at 8 sequences
+  (upstream's flags at the trained context: the card measures a 1M-token
+  KV pool on 2 cards at 8 sequences, so ~4 full-length ones at once).
 - `thinkingcap`: ThinkingCap-Qwen3.8-27B (a Qwen3.8-27B finetune that
   reasons in fewer tokens) as block FP8 with Qwen3.8's DFlash2 drafter, the
   same form and speed as `qwen3.8-radiance`. Nobody publishes this `.rad`, so
