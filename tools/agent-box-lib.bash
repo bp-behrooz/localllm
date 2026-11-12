@@ -1209,21 +1209,82 @@ _box_gh_env() {
 # by name only, so the value stays out of the host's process list. They live
 # outside BOX_HOME, which the box mounts read-write as /root: there the agent
 # could read every profile and plant lines this host then evals.
+#
+# A profile can also bring a host side, e.g. a proxy holding a password the box
+# shouldn't see, one per launch so no two boxes share it:
+#   BOX_LAUNCH_PORT=VAR[,VAR...]  a line in the .env: each VAR gets a free host
+#                  port, reserved for this launch, forwarded to this box alone
+#                  and passed into it. Later lines can use $VAR.
+#   ~/.box.NAME.up    runs in bash on the host before the box starts, with the
+#                  profile's variables set; the launch stops if it fails.
+#   ~/.box.NAME.down  runs when the launch exits, even if .up failed partway.
+# Both get BOX_HOOK_DIR, a private directory for this launch (a generated
+# config, a pid file), deleted after .down.
 _box_profile_env() { printf '%s' "$HOME/.box.$1.env"; }
+_box_profile_hook() { printf '%s' "$HOME/.box.$1.$2"; }
+
+# _box_profile_exists NAME: any of a profile's files is there.
+_box_profile_exists() {
+  [[ -f "$(_box_profile_env "$1")" || -f "$(_box_profile_hook "$1" up)" ||
+    -f "$(_box_profile_hook "$1" down)" ]]
+}
 
 _box_profile() {
   local name
   BOX_PROFILE_ENV=()
   _box_profile_legacy default
   [[ -f "$(_box_profile_env default)" ]] && _box_profile_load default
+  _box_profile_hooks default
   name="$(box_knob PROFILE "")"
   [[ -n $name && $name != default ]] || return 0
   _box_profile_legacy "$name"
-  [[ -f "$(_box_profile_env "$name")" ]] || {
+  _box_profile_exists "$name" || {
     echo "error: profile '$name' not found: $(_box_profile_env "$name")" >&2
     exit 1
   }
-  _box_profile_load "$name"
+  [[ -f "$(_box_profile_env "$name")" ]] && _box_profile_load "$name"
+  _box_profile_hooks "$name"
+}
+
+# _box_profile_hooks NAME: queue ~/.box.NAME.down for the exit, then run
+# ~/.box.NAME.up. Their output goes to stderr, with the launch's own messages.
+_box_profile_hooks() {
+  local name="$1" up down dir
+  up="$(_box_profile_hook "$name" up)"
+  down="$(_box_profile_hook "$name" down)"
+  [[ -f $up || -f $down ]] || return 0
+  # macOS's TMPDIR ends in a slash
+  dir="${TMPDIR:-/tmp}"
+  dir="$(mktemp -d "${dir%/}/agent-box-hook.XXXXXX")"
+  # Queued first, so a .up that fails halfway is still cleaned up after.
+  if [[ -f $down ]]; then
+    _box_at_exit "echo '==> profile $name: running $down' >&2; BOX_HOOK_DIR='$dir' bash '$down' >&2 || echo 'warning: profile $name: $down failed' >&2"
+  fi
+  _box_at_exit "rm -rf '$dir'"
+  [[ -f $up ]] || return 0
+  echo "==> profile $name: running $up" >&2
+  BOX_HOOK_DIR="$dir" bash "$up" >&2 || {
+    echo "error: profile $name: $up failed" >&2
+    exit 1
+  }
+}
+
+# _box_launch_ports LIST: give each variable named in LIST (comma-separated) a
+# free host port of its own, forwarded and passed into the box.
+_box_launch_ports() {
+  local name="$1" list="$2" var vars
+  IFS=, read -ra vars <<<"$list"
+  for var in "${vars[@]}"; do
+    [[ $var =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+      echo "error: profile $name: BOX_LAUNCH_PORT '$list': not a variable name" >&2
+      exit 1
+    }
+    _box_free_port 127.0.0.1
+    export "$var=$BOX_FREE_PORT"
+    _box_ports "$BOX_FREE_PORT"
+    BOX_PROFILE_ENV+=(--env "$var")
+    echo "==> profile $name: $var=$BOX_FREE_PORT, for this launch" >&2
+  done
 }
 
 # Profiles used to sit in BOX_HOME. Refuse to run while one still does, so it
@@ -1242,6 +1303,12 @@ _box_profile_load() {
   while IFS= read -r line || [[ -n $line ]]; do
     line="${line#export }"
     [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+    if [[ ${BASH_REMATCH[1]} == BOX_LAUNCH_PORT ]]; then
+      eval "$line"
+      _box_launch_ports "$name" "$BOX_LAUNCH_PORT"
+      unset BOX_LAUNCH_PORT
+      continue
+    fi
     # export, not just assign: --env NAME inherits from the environment, so a
     # bare shell variable would pass nothing.
     eval "export $line"

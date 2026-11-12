@@ -144,6 +144,65 @@ forwarded port. socat logs out of the agent's way, to
 10 newest kept) and to `/tmp/box-entry-socat.log` in the box, with each
 forward's share of a log capped at 1 MiB.
 
+### A database without its password
+
+A profile can bring its own host side, started for each launch and stopped
+when it exits, so `claude-box --profile db` is the whole command:
+
+- `BOX_LAUNCH_PORT=VAR` (or `VAR1,VAR2`), a line in `~/.box.db.env`: each `VAR`
+  gets a free host port of its own for this launch, forwarded to this box
+  alone and passed into it. Lines after it can use `$VAR`.
+- `~/.box.db.up` runs in bash on the host before the box starts, with the
+  profile's variables set. If it fails, the box doesn't start.
+- `~/.box.db.down` runs when the launch exits (Ctrl-C and a closed terminal
+  too), even if `.up` failed halfway.
+
+Both get `$BOX_HOOK_DIR`, a private directory for this launch, deleted after
+`.down`. Keep a hook's secrets in the host keychain with `box-secret set
+NAME` (`get`, `show`, `remove`); `box-secret get NAME` prints it only into
+`$(...)` or a pipe, never to a terminal. For example, a PgBouncer per launch
+holding a password stored with `box-secret set db`:
+
+```sh
+# ~/.box.db.env
+BOX_LAUNCH_PORT=PGPORT
+PGHOST=127.0.0.1
+PGDATABASE=<db>
+```
+
+```sh
+# ~/.box.db.up
+pw=$(box-secret get db) || exit 1
+cat >"$BOX_HOOK_DIR/pgbouncer.ini" <<EOF
+[databases]
+<db> = host=<rds-host> port=5432 dbname=<db> user=<read-only-role> password=$pw
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = $PGPORT
+unix_socket_dir =
+auth_type = any
+pidfile = $BOX_HOOK_DIR/pgbouncer.pid
+logfile = $BOX_HOOK_DIR/pgbouncer.log
+server_tls_sslmode = verify-full
+server_tls_ca_file = $HOME/path/to/global-bundle.pem
+EOF
+pgbouncer -d "$BOX_HOOK_DIR/pgbouncer.ini"
+```
+
+```sh
+# ~/.box.db.down: also runs after a failed .up, when there may be no pid file
+pid=$BOX_HOOK_DIR/pgbouncer.pid
+[ ! -f "$pid" ] || kill "$(cat "$pid")"
+```
+
+In the box a bare `psql` connects (`PGHOST`, `PGPORT` and `PGDATABASE` are
+set). `auth_type = any` lets anyone who reaches the port in, as the role on the
+`[databases]` line; only this box and the host's own processes reach it. A
+launch killed with `kill -9` skips `.down`, leaving PgBouncer and its config
+behind. Hiding the password doesn't limit what the connection can do, so give
+it a read-only role.
+
 On a Mac, `--docker` used to reach the Mac through a pf rule that gave every
 box all of the Mac's loopback until a reboot. While one set up this boot is
 still loaded, every launch offers to take it down (sudo) and won't start
@@ -272,7 +331,10 @@ to the agent.
 - `--profile NAME` passes the variables from `~/.box.NAME.env` (lines like
   `export FOO=bar`) into the box. `~/.box.default.env` is always read if it
   exists, with `NAME` on top. Profiles are shared by every box and kept out of
-  the box home, so the agent can't read or change them.
+  the box home, so the agent can't read or change them. Each line is evaluated
+  on the host at launch, so `export TOKEN=$(some-cli print-token)` mints a fresh
+  value every time. A profile can also start and stop host services per launch;
+  see [A database without its password](#a-database-without-its-password).
 - `--rebuild` rebuilds only the image you launch, so with a profile that has
   its own Dockerfile, pass `--profile` too. A launch warns when the image's
   agent is behind npm (checked in the background, at most once a day; not

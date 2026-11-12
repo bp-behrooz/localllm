@@ -275,6 +275,66 @@ wsl_note() {
   [[ $status -ne 0 ]]
 }
 
+@test "profile hooks: a launch port is this launch's own, forwarded and passed in" {
+  export CL_BOX_RUNTIME=crun
+  printf 'BOX_LAUNCH_PORT=PGPORT,REDIS_PORT\nexport URL=pg://127.0.0.1:$PGPORT\n' >"$HOME/.box.db.env"
+  printf 'echo "$PGPORT $REDIS_PORT $URL" >"%s/up.saw"\n' "$FAKE_DIR" >"$HOME/.box.db.up"
+  run_box --profile db --shell -c true
+  [[ $status -eq 0 ]]
+  local pg redis url
+  read -r pg redis url <"$FAKE_DIR/up.saw"
+  [[ $pg != "$redis" && $url == "pg://127.0.0.1:$pg" ]]
+  ((pg >= 24100 && pg < 24200 && redis >= 24100 && redis < 24200))
+  run_has --network "pasta:-T,$pg,-T,$redis"
+  run_has --env PGPORT
+  run_has --env REDIS_PORT
+  run_has --env URL
+  run grep -q BOX_LAUNCH_PORT "$FAKE_DIR/run.args"
+  [[ $status -ne 0 ]]
+}
+
+@test "profile hooks: a launch port names a variable" {
+  as_mac
+  printf 'BOX_LAUNCH_PORT=6432\n' >"$HOME/.box.db.env"
+  run_box --profile db --shell -c true
+  [[ $status -ne 0 && $output == *"BOX_LAUNCH_PORT '6432': not a variable name"* ]]
+}
+
+@test "profile hooks: up before the box, down after, sharing a private dir" {
+  as_mac
+  printf 'export DB_NAME=bestplay\n' >"$HOME/.box.db.env"
+  cat >"$HOME/.box.db.up" <<EOF
+[ -e "$FAKE_DIR/run.args" ] && echo late >"$FAKE_DIR/up.late"
+echo "\$DB_NAME" >"\$BOX_HOOK_DIR/state"
+echo "\$BOX_HOOK_DIR" >"$FAKE_DIR/hook.dir"
+echo up-to-stdout
+EOF
+  cat >"$HOME/.box.db.down" <<EOF
+[ -e "$FAKE_DIR/run.args" ] && cat "\$BOX_HOOK_DIR/state" >"$FAKE_DIR/down.saw"
+EOF
+  run_box --profile db --shell -c true
+  [[ $status -eq 0 && $output == *up-to-stdout* ]]
+  [[ ! -e $FAKE_DIR/up.late ]]
+  [[ $(cat "$FAKE_DIR/down.saw") == bestplay ]]
+  [[ ! -e "$(cat "$FAKE_DIR/hook.dir")" ]]
+}
+
+@test "profile hooks: a failing up stops the launch, and down still runs" {
+  as_mac
+  printf 'exit 3\n' >"$HOME/.box.db.up"
+  printf 'touch "%s/down.ran"\n' "$FAKE_DIR" >"$HOME/.box.db.down"
+  run_box --profile db --shell -c true
+  [[ $status -ne 0 && $output == *"profile db: "*".box.db.up failed"* ]]
+  [[ ! -e $FAKE_DIR/run.args && -e $FAKE_DIR/down.ran ]]
+}
+
+@test "profile hooks: a failing down warns, and keeps the launch's status" {
+  as_mac
+  printf 'exit 3\n' >"$HOME/.box.db.down"
+  run_box --profile db --shell -c true
+  [[ $status -eq 0 && $output == *"warning: profile db: "*".box.db.down failed"* ]]
+}
+
 @test "box: refuses rootful podman" {
   export CL_BOX_RUNTIME=crun FAKE_ROOTLESS=false
   run_box --shell -c true
@@ -998,6 +1058,42 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   [[ $status -eq 0 && $output == *"no token for $BATS_TEST_TMPDIR"* ]]
 }
 
+# a secret-tool that keeps each secret in a file named after its account
+fake_secret_tool() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$FAKE_DIR/secrets"
+  cat >"$BATS_TEST_TMPDIR/bin/secret-tool" <<'EOF'
+#!/bin/bash
+f="$FAKE_DIR/secrets/$(printf %s "${!#}" | tr / _)"
+case $1 in
+  store) cat >"$f" ;;
+  lookup) [ -f "$f" ] && cat "$f" ;;
+  clear) rm "$f" ;;
+esac
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/secret-tool"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+@test "box-secret: set, get in \$(...), show, remove" {
+  fake_secret_tool
+  run "$TOOLS/box-secret" set db <<<"s3cret"
+  [[ $status -eq 0 && $output == "stored db" ]]
+  [[ $("$TOOLS/box-secret" get db) == s3cret ]]
+  run "$TOOLS/box-secret" show db
+  [[ $output == "db is set" ]]
+  run "$TOOLS/box-secret" remove db
+  [[ $output == "removed db" ]]
+  run "$TOOLS/box-secret" get db
+  [[ $status -ne 0 && $output == *"box-secret set db"* ]]
+}
+
+@test "box-secret: get won't print to a terminal" {
+  command -v script >/dev/null || skip "no script(1)"
+  fake_secret_tool
+  printf s3cret >"$FAKE_DIR/secrets/db"
+  run script -qec "'$TOOLS/box-secret' get db" /dev/null
+  [[ $output == *"not printing db to a terminal"* && $output != *s3cret* ]]
+}
 
 @test "gh: no --gh means no token is passed, even if one is stored" {
   load_lib
