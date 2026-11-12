@@ -1089,7 +1089,13 @@ EOF
   command -v script >/dev/null || skip "no script(1)"
   fake_secret_tool
   printf s3cret >"$FAKE_DIR/secrets/db"
-  run script -qec "'$TOOLS/box-secret' get db" /dev/null
+  # a terminal on stdout: util-linux script takes -c CMD, BSD/macOS's takes
+  # CMD after the file (uname is stubbed here, so ask script which it is)
+  if script --version >/dev/null 2>&1; then
+    run script -qec "'$TOOLS/box-secret' get db" /dev/null
+  else
+    run script -q /dev/null "$TOOLS/box-secret" get db
+  fi
   [[ $output == *"not printing db to a terminal"* && $output != *s3cret* ]]
 }
 

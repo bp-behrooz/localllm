@@ -15,7 +15,7 @@ setup() {
   unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   local v
   for v in $(compgen -v | grep '_BOX_'); do unset "$v"; done
-  unset SSH_AUTH_SOCK
+  unset SSH_AUTH_SOCK GH_TOKEN
   cd "$BATS_TEST_TMPDIR" || return
 }
 
