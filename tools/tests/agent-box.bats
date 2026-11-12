@@ -531,10 +531,14 @@ print(s.getsockname()[1], flush=True); time.sleep(30)' >"$BATS_TEST_TMPDIR/port"
   container() { :; }
   sleep() { :; }
   BOX_MAC_FWD=("24100 TCP:127.0.0.1:5432")
-  # not under `run`: the watcher has to be this shell's child for `wait`; the
-  # socats it would start aren't, so give them a moment (sleep is stubbed)
+  # the watcher is disowned, so `wait` can't: poll for its warning instead,
+  # then give any socat it wrongly started a moment (sleep is stubbed)
   _box_mac_forwards cl-nope-1 2>"$BATS_TEST_TMPDIR/err"
-  wait
+  local i
+  for ((i = 0; i < 100; i++)); do
+    grep -q "cl-nope-1 showed no IP" "$BATS_TEST_TMPDIR/err" && break
+    command sleep 0.1
+  done
   command sleep 0.5
   [[ ! -e "$FAKE_DIR/socat.calls" ]]
   grep -q "cl-nope-1 showed no IP" "$BATS_TEST_TMPDIR/err"

@@ -871,6 +871,9 @@ _box_mac_forwards() {
     done
   ) &
   watcher=$!
+  # Not a job of this shell any more, so killing it at exit is quiet: bash
+  # would print the whole subshell as "Killed: 9" when the box exits first.
+  disown "$watcher"
   _box_at_exit "kill -9 $watcher 2>/dev/null; sleep 0.1; kill -9 \$(cat '$pids') 2>/dev/null; rm -f '$pids'"
 }
 
