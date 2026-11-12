@@ -5,50 +5,42 @@
 #   box-gh-token set      store a token (hidden prompt on a TTY, else read stdin)
 #   box-gh-token remove   delete the repo's token
 #   box-gh-token show     report whether a token is set (never prints it)
+#   box-gh-token get      print it, for --gh; refuses a terminal
 #
-# Stored in the host keychain (macOS: `security`; Linux: `secret-tool`), keyed by
-# the main worktree's path. It is never written into the repo or ~/.box.*.
+# A box-secret named gh:<main worktree's path>, so in the host keychain. It is
+# never written into the repo or ~/.box.*.
 set -euo pipefail
+
+# box-secret sits next to this script. Symlinks are followed, so
+# `ln -s .../tools/box-gh-token ~/bin/box-gh-token` still finds it.
+self="${BASH_SOURCE[0]}"
+while [[ -L $self ]]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ $self == /* ]] || self="$dir/$self"
+done
+dir="$(cd -P "$(dirname "$self")" && pwd)"
 
 # Outside git, key by $PWD so a multi-repo feature workspace (<branch>/<repo>)
 # can hold one token for the whole feature.
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
   common="$(pwd -P)/.git"
 key=$(dirname "$common")
-
-case $(uname -s) in
-  Darwin)
-    get() { security find-generic-password -s box-gh -a "$key" -w 2>/dev/null; }
-    put() { security add-generic-password -U -s box-gh -a "$key" -w "$1"; }
-    del() { security delete-generic-password -s box-gh -a "$key" >/dev/null 2>&1; }
-    ;;
-  *)
-    get() { secret-tool lookup service box-gh account "$key" 2>/dev/null; }
-    put() { printf '%s' "$1" | secret-tool store --label="box-gh $key" service box-gh account "$key"; }
-    del() { secret-tool clear service box-gh account "$key"; }
-    ;;
-esac
+name="gh:$key"
 
 case ${1-} in
-  set)
-    if [[ -t 0 ]]; then
-      read -rsp "GitHub token for $key: " tok
-      echo
-    else
-      read -r tok
-    fi
-    [[ -n $tok ]] || { echo "error: empty token" >&2; exit 1; }
-    put "$tok"
-    echo "stored token for $key"
+  set | remove | show)
+    exec "$dir/box-secret" "$1" "$name"
     ;;
-  remove)
-    del && echo "removed token for $key" || echo "no token for $key"
-    ;;
-  show)
-    if get >/dev/null; then echo "token set for $key"; else echo "no token for $key"; fi
+  get)
+    [[ "$("$dir/box-secret" show "$name")" == "$name is set" ]] || {
+      echo "error: no GitHub token for $key (run \`box-gh-token set\` in the main checkout)" >&2
+      exit 1
+    }
+    exec "$dir/box-secret" get "$name"
     ;;
   *)
-    echo "usage: box-gh-token set|remove|show" >&2
+    echo "usage: box-gh-token set|remove|show|get" >&2
     exit 2
     ;;
 esac

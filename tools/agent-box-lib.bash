@@ -41,6 +41,10 @@
   exit 1
 }
 
+# The tools next to this lib (box-gh-token, box-secret). The scripts source it
+# by its resolved path, so this is the real directory.
+BOX_LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # The host runtime: Apple's `container` CLI on a Mac, rootless podman on Linux
 # (setup in tools/README.md).
 if [[ $(uname -s) == Linux ]]; then
@@ -1164,18 +1168,13 @@ _box_git_env() {
   fi
 }
 
-# Repo GitHub tokens live in the host keychain, keyed by the main worktree's
-# path (`box-gh-token set`). Nothing is written into the repo or ~/.box.*.
-_box_gh_keychain_get() {
-  case $(uname -s) in
-    Darwin) security find-generic-password -s box-gh -a "$1" -w 2>/dev/null ;;
-    *)      secret-tool lookup service box-gh account "$1" 2>/dev/null ;;
-  esac
-}
+# The repo's GitHub token, from the host keychain (`box-gh-token set`, which
+# sits next to this lib). Nothing is written into the repo or ~/.box.*.
+_box_gh_token() { "$BOX_LIB_DIR/box-gh-token" get; }
 
 _box_gh_env() {
-  # --gh: hand the box the repo's GitHub token. Keyed by the main worktree, so
-  # every worktree of the repo shares it. Exported rather than passed by value:
+  # --gh: hand the box the repo's GitHub token. box-gh-token keys it by the main
+  # worktree, so every worktree of the repo shares it. Exported rather than passed by value:
   # `--env NAME` inherits it, keeping the token out of the host's process list.
   # --gh=host: hand it the host's own `gh auth token` instead, for this run only.
   BOX_GH_ENV=()
@@ -1190,15 +1189,12 @@ _box_gh_env() {
     exit 1
   fi
   [[ "$(box_knob GH)" == 1 ]] || return 0
-  local common key
-  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common="$(pwd -P)/.git"
-  key="$(dirname "$common")"
-  if GH_TOKEN=$(_box_gh_keychain_get "$key") && [[ -n $GH_TOKEN ]]; then
+  if GH_TOKEN=$(_box_gh_token) && [[ -n $GH_TOKEN ]]; then
     export GH_TOKEN
     BOX_GH_ENV=(--env GH_TOKEN)
-    echo "==> gh: token for $key" >&2
+    echo "==> gh: the repo's token" >&2
   else
-    echo "error: --gh: no token for $key (run \`box-gh-token set\` in the main checkout)" >&2
+    echo "error: --gh: no token passed" >&2
     exit 1
   fi
 }
