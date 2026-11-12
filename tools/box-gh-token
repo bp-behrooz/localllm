@@ -33,11 +33,14 @@ case ${1-} in
     exec "$dir/box-secret" "$1" "$name"
     ;;
   get)
-    [[ "$("$dir/box-secret" show "$name")" == "$name is set" ]] || {
-      echo "error: no GitHub token for $key (run \`box-gh-token set\` in the main checkout)" >&2
+    # box-secret would refuse a terminal too, but its message there would be
+    # hidden below along with its "no secret" one
+    [[ ! -t 1 ]] || { echo "error: not printing the token to a terminal" >&2; exit 1; }
+    "$dir/box-secret" get "$name" 2>/dev/null || {
+      echo "error: no GitHub token for $key (run \`box-gh-token set\` in the main checkout;" >&2
+      echo "       tokens stored before box-secret took them over need setting again)" >&2
       exit 1
     }
-    exec "$dir/box-secret" get "$name"
     ;;
   *)
     echo "usage: box-gh-token set|remove|show|get" >&2

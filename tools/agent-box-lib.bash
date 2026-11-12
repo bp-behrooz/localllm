@@ -940,12 +940,18 @@ _box_at_exit() {
   BOX_AT_EXIT+=("$1")
   trap '_box_run_at_exit' EXIT
 }
-# Runs every cleanup and keeps the script's own exit status. Under set -e a
-# failing cleanup (a forwarder that already died) would otherwise end the trap
-# early, skipping the rest, and become the status.
+# Runs every cleanup, newest first, and keeps the script's own exit status.
+# Newest first so a thing is undone before what it was built on: a profile's
+# .down before default's, a service before the reservation of its port. Under
+# set -e a failing cleanup (a forwarder that already died) would otherwise end
+# the trap early, skipping the rest, and become the status.
 _box_run_at_exit() {
-  local rc=$? c
+  local rc=$? c rev=()
+  # reversed by prepending: bash 3.2 under set -u can't index an empty array
   for c in ${BOX_AT_EXIT[@]+"${BOX_AT_EXIT[@]}"}; do
+    rev=("$c" ${rev[@]+"${rev[@]}"})
+  done
+  for c in ${rev[@]+"${rev[@]}"}; do
     eval "$c" || true
   done
   return "$rc"
@@ -1255,11 +1261,12 @@ _box_profile_hooks() {
   # macOS's TMPDIR ends in a slash
   dir="${TMPDIR:-/tmp}"
   dir="$(mktemp -d "${dir%/}/agent-box-hook.XXXXXX")"
-  # Queued first, so a .up that fails halfway is still cleaned up after.
+  # Queued before .up runs, so a .up that fails halfway is still cleaned up
+  # after; the dir first, as the exit runs them newest first and .down needs it.
+  _box_at_exit "rm -rf '$dir'"
   if [[ -f $down ]]; then
     _box_at_exit "echo '==> profile $name: running $down' >&2; BOX_HOOK_DIR='$dir' bash '$down' >&2 || echo 'warning: profile $name: $down failed' >&2"
   fi
-  _box_at_exit "rm -rf '$dir'"
   [[ -f $up ]] || return 0
   echo "==> profile $name: running $up" >&2
   BOX_HOOK_DIR="$dir" bash "$up" >&2 || {
@@ -1272,8 +1279,12 @@ _box_profile_hooks() {
 # free host port of its own, forwarded and passed into the box.
 _box_launch_ports() {
   local name="$1" list="$2" var vars
+  [[ -n $list ]] || {
+    echo "error: profile $name: BOX_LAUNCH_PORT is empty; name a variable, e.g. BOX_LAUNCH_PORT=PGPORT" >&2
+    exit 1
+  }
   IFS=, read -ra vars <<<"$list"
-  for var in "${vars[@]}"; do
+  for var in ${vars[@]+"${vars[@]}"}; do
     [[ $var =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
       echo "error: profile $name: BOX_LAUNCH_PORT '$list': not a variable name" >&2
       exit 1

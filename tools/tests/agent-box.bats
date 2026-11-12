@@ -335,6 +335,23 @@ EOF
   [[ $status -eq 0 && $output == *"warning: profile db: "*".box.db.down failed"* ]]
 }
 
+@test "profile hooks: an empty launch port is refused, not ignored" {
+  as_mac
+  printf 'BOX_LAUNCH_PORT=\n' >"$HOME/.box.db.env"
+  BOX_TEST_BASH=/bin/bash run_box --profile db --shell -c true
+  [[ $status -ne 0 && $output == *"BOX_LAUNCH_PORT is empty"* ]]
+}
+
+@test "profile hooks: the named profile's down runs before default's" {
+  as_mac
+  local p
+  for p in default db; do
+    printf 'echo %s >>"%s/downs"\n' "$p" "$FAKE_DIR" >"$HOME/.box.$p.down"
+  done
+  run_box --profile db --shell -c true
+  [[ $status -eq 0 && $(paste -sd, "$FAKE_DIR/downs") == db,default ]]
+}
+
 @test "box: refuses rootful podman" {
   export CL_BOX_RUNTIME=crun FAKE_ROOTLESS=false
   run_box --shell -c true
@@ -1097,6 +1114,55 @@ EOF
     run script -q /dev/null "$TOOLS/box-secret" get db
   fi
   [[ $output == *"not printing db to a terminal"* && $output != *s3cret* ]]
+}
+
+@test "box-secret: keeps spaces at either end, and a last line without a newline" {
+  fake_secret_tool
+  printf %s '  s3 cret  ' | "$TOOLS/box-secret" set db
+  [[ $("$TOOLS/box-secret" get db) == '  s3 cret  ' ]]
+}
+
+@test "box-secret: a name with a quote or backslash is refused" {
+  run "$TOOLS/box-secret" set 'a"b'
+  [[ $status -eq 2 && $output == *"can't hold"* ]]
+  run "$TOOLS/box-secret" set 'a\b'
+  [[ $status -eq 2 ]]
+}
+
+# macOS's security, keeping each item in a file named after its account. It
+# logs its argv, and takes `-i` commands on stdin with -X hex, as the real one.
+fake_security() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$FAKE_DIR/keychain"
+  cat >"$BATS_TEST_TMPDIR/bin/security" <<'EOF'
+#!/bin/bash
+echo "$*" >>"$FAKE_DIR/security.argv"
+item() { printf '%s/keychain/%s' "$FAKE_DIR" "$(printf %s "$1" | tr / _)"; }
+if [ "$1" = -i ]; then
+  read -r line
+  acct=${line#*-a \"}; acct=${acct%%\" -X *}
+  hex=${line##* -X }
+  printf "$(printf %s "$hex" | sed 's/../\\x&/g')" >"$(item "$acct")"
+  exit 0
+fi
+cmd=$1; shift
+while [ $# -gt 0 ]; do [ "$1" = -a ] && acct=$2; shift; done
+case $cmd in
+  find-generic-password) [ -f "$(item "$acct")" ] && cat "$(item "$acct")" ;;
+  delete-generic-password) rm "$(item "$acct")" ;;
+esac
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/security"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+@test "box-secret: on macOS the secret goes to security on stdin, never in argv" {
+  as_mac
+  fake_security
+  local secret=' p@ss "w$rd\ %s '
+  printf %s "$secret" | "$TOOLS/box-secret" set gh:/a/b
+  [[ $("$TOOLS/box-secret" get gh:/a/b) == "$secret" ]]
+  run grep -F 'p@ss' "$FAKE_DIR/security.argv"
+  [[ $status -ne 0 ]]
 }
 
 @test "box-gh-token: a box-secret keyed by the current directory outside a repo" {
