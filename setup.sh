@@ -37,10 +37,7 @@ declare -A PRESET=(
   # The other one-card option: a 35B-A3B MoE whose 4-bit experts fit with room
   # for 262K. The card's coding settings; thinking stays on by default.
   [ornith-1.5]="1|cmd|RAD_REPO=keptn/ornith-1.5-35b-a3b-w4a8 MAXLEN=262144 /opt/localllm/serve-radiance.sh ornith-1.5-35b-a3b-w4a8.rad --max-num-seqs 8 --kv-cache-dtype i8 --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 0.6 --top-p 0.95 --top-k 20 --presence-penalty 0"
-  # Recursive Flint (39.8B-A2.5B): out-of-tree plugin (bp-behrooz/radiance-flint)
-  # + .rads built by `./setup.sh download` in throwaway containers.
-  [flint-q8]="2|cmd|RAD_REPO=RecursiveSI/flint MAXLEN=131072 /opt/localllm/serve-radiance.sh flint-q8.rad --gpu-headroom-mib 160 --kv-cache-dtype i8"
-  [flint-q4]="1|cmd|RAD_REPO=RecursiveSI/flint MAXLEN=262144 /opt/localllm/serve-radiance.sh flint-q4.rad --gpu-headroom-mib 160 --kv-cache-dtype i8"
+  [flint]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh flint-iq8r.rad --kv-cache-dtype i8"
 )
 
 # preloaded by the pool at startup (space-separated preset names)
@@ -76,76 +73,6 @@ is_radiance() { # <preset>: 0 = radiance (sets RAD, RAD_REPO), 1 = not one; dies
   RAD_REPO=${RAD_REPO:-StillDeadcode/${RAD%.rad}}
 }
 
-FLINT_GIT=https://github.com/bp-behrooz/radiance-flint.git
-FLINT_WORK=  # temp dir under /opt/localllm, shared if download builds both q8 and q4
-
-flint_podman() { # <podman args...>: run rootless podman as localllm from /opt/localllm
-  (cd /opt/localllm && sudo -u localllm env HOME=/opt/localllm \
-    XDG_RUNTIME_DIR="/run/user/$(id -u localllm)" podman "$@")
-}
-
-flint_build() { # <flint-q8.rad|flint-q4.rad>: build plugin + .rad in throwaway containers
-  local rad=$1 recipe="flint-bf16-${1#flint-}"; recipe="${recipe%.rad}.recipe"
-  local rad_img
-  rad_img=$(sed -n 's/^IMAGE=\${RADIANCE_IMAGE:-\(.*\)}/\1/p' "$(dirname "$0")/pool/serve-radiance.sh")
-  install -d -o localllm -g localllm /opt/localllm/models /opt/localllm/plugins
-  if [[ -z $FLINT_WORK ]]; then
-    FLINT_WORK=$(sudo -u localllm mktemp -d /opt/localllm/.flint-work.XXXXXX)
-    trap 'rm -rf -- "$FLINT_WORK"' EXIT
-  fi
-  flint_podman image exists "$rad_img" 2>/dev/null || flint_podman pull "$rad_img"
-
-  # 1. Build flint.so in a throwaway ubuntu:24.04 container against the pinned image's SDK
-  if [[ ! -d $FLINT_WORK/src ]]; then
-    sudo -u localllm mkdir -p "$FLINT_WORK/sdk/share/radiance"
-    flint_podman run --rm --log-driver k8s-file \
-      -v "$FLINT_WORK/sdk:/sdk" --entrypoint busybox "$rad_img" \
-      cp -a /opt/radiance/include /opt/radiance/lib /sdk/
-    flint_podman run --rm --log-driver k8s-file \
-      -v "$FLINT_WORK/sdk:/opt/radiance:ro" \
-      -v "$FLINT_WORK:/work" \
-      -v /opt/localllm/plugins:/plugins \
-      docker.io/library/ubuntu:24.04 bash -ec "
-        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          ca-certificates git cmake ninja-build g++-14
-        git clone --depth 1 '$FLINT_GIT' /work/src
-        CC=gcc-14 CXX=g++-14 cmake -S /work/src -B /tmp/build -G Ninja \
-          -DCMAKE_PREFIX_PATH=/opt/radiance -DRAD_PLUGIN_INSTALL_HOME=/plugins
-        cmake --build /tmp/build -j
-        cmake --install /tmp/build"
-    flint_podman run --rm --log-driver k8s-file \
-      -v /opt/localllm/plugins:/plugins:ro \
-      -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance \
-      --entrypoint rad-info "$rad_img" --plugins | grep '\bflint\b' \
-      || { echo "flint plugin failed rad-info --plugins check" >&2; exit 1; }
-  fi
-
-  # 2. Fetch RecursiveSI/flint (once per run) and convert in a throwaway radiance container
-  if [[ ! -f /opt/localllm/models/$rad ]]; then
-    if [[ ! -d $FLINT_WORK/ckpt ]]; then
-      sudo -u localllm env HF_TOKEN="${HF_TOKEN:-}" HF_XET_HIGH_PERFORMANCE=1 \
-        /opt/localllm/venv/bin/hf download RecursiveSI/flint --local-dir "$FLINT_WORK/ckpt"
-    fi
-    flint_podman run --rm --log-driver k8s-file \
-      --device /dev/kfd --device /dev/dri \
-      --group-add keep-groups \
-      --security-opt seccomp=unconfined \
-      -v /opt/localllm/plugins:/plugins:ro \
-      -v "$FLINT_WORK:/work:ro" \
-      -v /opt/localllm/models:/models \
-      -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance \
-      --entrypoint rad-convert "$rad_img" \
-      /work/ckpt \
-      --add /work/src/data/flint-zero-bias.safetensors \
-      --recipe "/work/src/data/recipes/$recipe" \
-      --chat-template /work/src/data/flint-chat-template.jinja \
-      --gpus "$(IFS=,; echo "${GPUS[*]}")" \
-      -o "/models/$rad"
-  else
-    echo "$rad already in /opt/localllm/models; plugin refreshed"
-  fi
-}
-
 hf_fetch() { # <preset>
   if is_radiance "$1"; then
     # .rads land flat by file name, so two repos can't share one name
@@ -161,11 +88,6 @@ hf_fetch() { # <preset>
     done
     RAD=$rad RAD_REPO=$repo
     [[ "$RAD_REPO" == - ]] && { echo "skipping $1: $RAD is converted locally (see docs/presets.md)"; return 0; }
-    if [[ "$RAD_REPO" == RecursiveSI/flint ]]; then
-      flint_build "$RAD"
-      manifest_add "$RAD" "$RAD_REPO"
-      return
-    fi
     install -d -o localllm -g localllm /opt/localllm/models
     sudo -u localllm env HF_TOKEN="${HF_TOKEN}" HF_XET_HIGH_PERFORMANCE=1 \
       /opt/localllm/venv/bin/hf download "$RAD_REPO" "$RAD" \

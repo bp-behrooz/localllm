@@ -45,18 +45,11 @@ RDNA4 kernels and speculative decoding:
   `nanbeige4.3` is IQ8R (~34 GiB, ~33 tok/s decode on 2 GPUs), and
   `nanbeige4.3-int4` is 4-bit (~20 GiB, ~53 tok/s decode on 2 GPUs at 262K
   context; also fits 1 GPU at `MAXLEN=131072`, ~30 tok/s, if changed to `1|`).
-- `flint-q8` and `flint-q4`: Recursive Flint (39.8B total / ~2.5B active: 2
-  dense layers + 47 sigmoid-routed MoE layers with 256 experts top-6, sink
-  attention, 35 sliding layers at window 513 and 14 full NoPE layers), served
-  through the out-of-tree
-  [`bp-behrooz/radiance-flint`](https://github.com/bp-behrooz/radiance-flint)
-  architecture plugin (`flint.so` in `/opt/localllm/plugins/architectures`).
-  `sudo ./setup.sh download flint-q8 flint-q4` builds `flint.so` against the
-  pinned image's SDK in a throwaway `ubuntu:24.04` container, downloads
-  `RecursiveSI/flint` once into a temp dir, runs `rad-convert` in a throwaway
-  Radiance container for `flint-q8.rad` (38.2 GiB, 2 GPUs, 131K context,
-  ~105–113 tok/s decode) and `flint-q4.rad` (19.9 GiB, 1 GPU, 262K context,
-  ~115–132 tok/s decode), and deletes the temp dir when done.
+- `flint`: Recursive Flint (39.8B total / ~2.5B active: 2 dense layers + 47
+  sigmoid-routed MoE layers with 256 experts top-6, sink attention, 35 sliding
+  layers at window 513 and 14 full NoPE layers) in IQ8R (`flint-iq8r.rad`,
+  37.9 GiB, Hadamard-rotated int8 trunk and experts), 2 GPUs, 256K context
+  (~147 tok/s decode on two R9700s).
 
 A preset whose `.rad` isn't in a `StillDeadcode/<name>` repo names its repo
 with `RAD_REPO=<owner/repo>` in the cmd, as `gemma4-heretic` does;
@@ -74,7 +67,7 @@ rootless podman needs:
 sudo pacman -S podman crun
 sudo ./setup.sh
 (cd /opt/localllm && sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
-  podman pull docker.io/stilldeadcode/radiance@sha256:9ec1b8bf9011ebe219f4acbcef0e47d3a35c76067248219dd3965334ee63c0fb)
+  podman pull docker.io/stilldeadcode/radiance@sha256:d3d6c796083b0d00f2b462554aa002f853248506d55658d60d685017abb9b42d)
 sudo ./setup.sh download qwen3.8-flash-next qwen3.8-radiance gemma4-heretic   # 114 + 29 + 20 GiB
 sudo systemctl restart localllm
 ```
@@ -113,7 +106,7 @@ done
 (cd /opt/localllm && sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:9ec1b8bf9011ebe219f4acbcef0e47d3a35c76067248219dd3965334ee63c0fb \
+    docker.io/stilldeadcode/radiance@sha256:d3d6c796083b0d00f2b462554aa002f853248506d55658d60d685017abb9b42d \
     /src/bottlecapai/ThinkingCap-Qwen3.8-27B --draft-model /src/z-lab/Qwen3.8-27B-DFlash2 \
     --recipe /opt/radiance/share/radiance/recipes/q38-27b-iq8r-rtn.recipe \
     --set quantization_config.quant_method=w8a8 --set quantization_config.fmt=fwht128 \
@@ -137,7 +130,7 @@ sudo -u localllm bash -c 'source /opt/localllm/env && HF_TOKEN=$HF_TOKEN HF_XET_
 (cd /opt/localllm && sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:9ec1b8bf9011ebe219f4acbcef0e47d3a35c76067248219dd3965334ee63c0fb \
+    docker.io/stilldeadcode/radiance@sha256:d3d6c796083b0d00f2b462554aa002f853248506d55658d60d685017abb9b42d \
     /src/Nanbeige4.3-33B \
     --recipe /opt/radiance/share/radiance/recipes/minicpm5-2b-iq8r.recipe \
     -o /models/nanbeige4.3-33b-iq8r.rad)
@@ -146,7 +139,7 @@ sudo -u localllm bash -c 'source /opt/localllm/env && HF_TOKEN=$HF_TOKEN HF_XET_
 (cd /opt/localllm && sudo -u localllm env HOME=/opt/localllm XDG_RUNTIME_DIR=/run/user/$(id -u localllm) \
   podman run --rm --log-driver k8s-file \
     -v $SRC:/src:ro -v /opt/localllm/models:/models --entrypoint rad-convert \
-    docker.io/stilldeadcode/radiance@sha256:9ec1b8bf9011ebe219f4acbcef0e47d3a35c76067248219dd3965334ee63c0fb \
+    docker.io/stilldeadcode/radiance@sha256:d3d6c796083b0d00f2b462554aa002f853248506d55658d60d685017abb9b42d \
     /src/Nanbeige4.3-33B \
     --quant 'output.weight=rtn:codes=i8,group=128,scale=bf16,clamp=sym,rule=search' \
     --quant 'blk.*.weight=rtn:codes=u4,zero=u8,group=128,scale=f16,transform=fwht128,rule=search' \
