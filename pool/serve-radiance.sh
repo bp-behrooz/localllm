@@ -11,15 +11,24 @@ set -euo pipefail
 model=$1
 shift
 MODEL_DIR=/opt/localllm/models
-# pinned by digest (1.17.0): presets pass engine flags that releases rename
+PLUGIN_DIR=/opt/localllm/plugins
+# pinned by digest (2.0.0): presets pass engine flags that releases rename
 # or drop, so bump this together with them
-IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:6fb0e99bfb862e17cc15cb7b2f116c7dbdc831df59f82456a0691122e6cf5330}
+IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:9ec1b8bf9011ebe219f4acbcef0e47d3a35c76067248219dd3965334ee63c0fb}
 [ -f "$MODEL_DIR/$model" ] || {
   echo "missing $MODEL_DIR/$model; fetch it with: sudo ./setup.sh download <this preset>" >&2
   exit 1
 }
 podman image exists "$IMAGE" 2>/dev/null || podman pull "$IMAGE"
 tp=$(tr ',' '\n' <<<"$GPUS" | wc -l)
+plugins=()
+[ -d "$PLUGIN_DIR" ] && plugins=(
+  -v "$PLUGIN_DIR":/plugins:ro
+  -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance
+)
+# NAME is pool-<preset>-<port>; radiance 2.0 routes requests by the YAML model
+# key, and pool.py forwards the client's `"model": "<preset>"` untouched
+preset=${NAME#pool-}; preset=${preset%-"$PORT"}
 exec podman run --replace --name "$NAME" \
   --network host \
   --device /dev/kfd --device /dev/dri \
@@ -28,7 +37,10 @@ exec podman run --replace --name "$NAME" \
   --ulimit memlock=-1 \
   --init \
   -v "$MODEL_DIR":/models:ro \
+  "${plugins[@]}" \
   -e HIP_VISIBLE_DEVICES="$GPUS" \
-  "$IMAGE" \
+  --entrypoint sh "$IMAGE" -ec \
+  'rad-yaml "$@" >/tmp/radiance.yaml && exec radiance --config /tmp/radiance.yaml' -- \
+  --served-model-name "$preset" \
   --model "/models/$model" \
   --host :: --port "$PORT" --tp "$tp" --max-model-len "$MAXLEN" "$@"

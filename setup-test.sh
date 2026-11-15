@@ -8,14 +8,22 @@ eval "$(sed -n '/^declare -A PRESET=(/,/^)/p' setup.sh)"   # the real shipped ta
 fail() { echo "FAIL: $1"; exit 1; }
 
 is_radiance qwen3.8-radiance || fail "shipped radiance preset not detected"
-[[ $RAD == qwen3.8-27b-fp8.rad ]] || fail "wrong RAD: $RAD"
-[[ $RAD_REPO == StillDeadcode/qwen3.8-27b-fp8 ]] || fail "wrong default RAD_REPO: $RAD_REPO"
+[[ $RAD == qwen3.8-27b-iq8r-dflash.rad ]] || fail "wrong RAD: $RAD"
+[[ $RAD_REPO == StillDeadcode/qwen3.8-27b-iq8r-dflash ]] || fail "wrong default RAD_REPO: $RAD_REPO"
 is_radiance qwen3.8-flash-next || fail "flash-next radiance preset not detected"
-[[ $RAD == qwen3.8-next-flash-fp8-iq4r-moe.rad ]] || fail "wrong RAD: $RAD"
+[[ $RAD == qwen3.8-next-flash-iqr-v4.rad ]] || fail "wrong RAD: $RAD"
 is_radiance gemma4-heretic || fail "gemma4-heretic radiance preset not detected"
 [[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-w4a8 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
 is_radiance thinkingcap || fail "thinkingcap radiance preset not detected"
 [[ $RAD_REPO == - ]] || fail "local RAD_REPO=- not read: $RAD_REPO"
+is_radiance nanbeige4.3 || fail "nanbeige4.3 radiance preset not detected"
+[[ $RAD == nanbeige4.3-33b-iq8r.rad && $RAD_REPO == - ]] || fail "wrong nanbeige4.3 RAD/RAD_REPO: $RAD / $RAD_REPO"
+is_radiance nanbeige4.3-int4 || fail "nanbeige4.3-int4 radiance preset not detected"
+[[ $RAD == nanbeige4.3-33b-int4.rad && $RAD_REPO == - ]] || fail "wrong nanbeige4.3-int4 RAD/RAD_REPO: $RAD / $RAD_REPO"
+is_radiance flint-q8 || fail "flint-q8 radiance preset not detected"
+[[ $RAD == flint-q8.rad && $RAD_REPO == RecursiveSI/flint ]] || fail "wrong flint-q8 RAD/RAD_REPO: $RAD / $RAD_REPO"
+is_radiance flint-q4 || fail "flint-q4 radiance preset not detected"
+[[ $RAD == flint-q4.rad && $RAD_REPO == RecursiveSI/flint ]] || fail "wrong flint-q4 RAD/RAD_REPO: $RAD / $RAD_REPO"
 
 PRESET+=(
   [g]="1|org/x-GGUF:Q4_K_M|-c 4096"
@@ -64,6 +72,13 @@ out=$(set -e; hf_fetch gemma4-heretic 2>&1) || fail "clash check failed a clean 
 # a locally converted .rad (RAD_REPO=-) has nothing to download
 out=$(set -e; hf_fetch thinkingcap 2>&1) || fail "local .rad failed download: $out"
 [[ $out == *"converted locally"* && $out != *fetched* ]] || fail "local .rad not skipped: $out"
+# flint presets build plugin + .rad via flint_build and record in manifest
+eval "$(sed -n '/^flint_build()/,/^}/p' setup.sh)"
+declare -F flint_build >/dev/null || fail "flint_build() not found in setup.sh"
+flint_build() { echo "flint_built: $1"; }
+out=$(set -e; hf_fetch flint-q8 2>&1) || fail "flint-q8 failed download: $out"
+[[ $out == "flint_built: flint-q8.rad" ]] || fail "flint-q8 did not run flint_build: $out"
+grep -qx 'flint-q8.rad RecursiveSI/flint' "$MANIFEST" || fail "manifest missing flint-q8.rad"
 
 # prune: deletes a .rad `download` recorded that no preset names, and never one
 # built by hand (no record) or one a preset still names
