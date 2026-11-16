@@ -145,7 +145,9 @@ def main():
             check(f"proxy listens ({name})", wait_port(port), bind)
             ca = os.path.join(confdir, "mitmproxy-ca-cert.pem")
             for _ in range(200):
-                if os.path.exists(ca):
+                if os.path.exists(ca) and not any(
+                    n.startswith("run-") for n in os.listdir(confdir)
+                ):
                     break
                 time.sleep(0.05)
             check(f"mitm CA present ({name})", os.path.exists(ca), ca)

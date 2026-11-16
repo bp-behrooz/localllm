@@ -12,6 +12,8 @@ setup_file() {
   [[ ${BOX_IT:-} == 1 ]] || skip "set BOX_IT=1 to build and run a real box"
   export CL_BOX_RUNTIME=crun CL_BOX_CPUS=2 CL_BOX_MEMORY=2G
   export CL_BOX_HOME="$BATS_FILE_TMPDIR/box-home"
+  export CL_BOX_PROXY="$BATS_FILE_TMPDIR/proxy.json"
+  printf '%s\n' '{"allow":"none"}' >"$CL_BOX_PROXY"
   bash "$TOOLS/claude-box" --build-only
 }
 
