@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Stands in for podman: answers what the boxes ask, and records `run`'s
-# arguments one per line in $FAKE_DIR/run.args.
+# arguments one per line in $FAKE_DIR/run.args. A run of the proxy container
+# (its name holds -proxy-) is recorded in $FAKE_DIR/proxy.args instead, and it
+# listens where the launch will look for it: a launch that cannot reach its
+# proxy must stop, so the stub has to answer.
 # The version check's `npm ls` gets $FAKE_AGENT_VERSION, and isn't recorded.
 if [[ $1 == run && $* == *"--entrypoint npm"* ]]; then
   [[ -z ${FAKE_AGENT_VERSION-} ]] || echo "\`-- ${*: -1}@$FAKE_AGENT_VERSION"
@@ -9,12 +12,55 @@ fi
 echo "podman $*" >>"$FAKE_DIR/calls"
 case $1 in
 info) echo "${FAKE_ROOTLESS:-true}" ;;
+network)
+  # create/rm are recorded above; no other output needed.
+  ;;
 image)
-  # the image exists; with --format, its agent-box.entry label
-  [[ $2 == inspect && $* == *--format* ]] && echo "${FAKE_ENTRY:-7}"
+  # the image exists; with --format, the agent-box.entry label or the CA stamp
+  if [[ $2 == inspect && $* == *--format* ]]; then
+    if [[ $* == *agent-box.ca* ]]; then
+      echo "${FAKE_CA_STAMP-}"
+    else
+      echo "${FAKE_ENTRY:-7}"
+    fi
+  fi
+  ;;
+inspect)
+  [[ -z ${FAKE_NO_IP-} ]] || exit 0
+  python3 - "$FAKE_DIR/proxy.args" "${FAKE_PROXY_IP:-127.0.0.2}" "$@" <<'PY'
+import re, sys
+try:
+    args = open(sys.argv[1]).read().splitlines()
+except OSError:
+    args = []
+nets = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--network"]
+match = re.search(r'Networks "([^"]+)"', " ".join(sys.argv[3:]))
+if match and match[1] in nets:
+    print(sys.argv[2])
+PY
   ;;
 run)
   shift
+  name= prev=
+  for arg in "$@"; do
+    [[ $prev != --name ]] || name=$arg
+    prev=$arg
+  done
+  if [[ $name == *-proxy-* ]]; then
+    printf '%s\n' "$@" >"$FAKE_DIR/proxy.args"
+    addr=127.0.0.2 port=8080 a=("$@")
+    for i in "${!a[@]}"; do
+      if [[ ${a[$i]} == -p && ${a[$((i + 1))]} =~ ^127\.0\.0\.1:([0-9]+):8080$ ]]; then
+        addr=127.0.0.1 port=${BASH_REMATCH[1]}
+      fi
+    done
+    nohup python3 -c 'import socket,sys,time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2]))); s.listen(); time.sleep(300)' "$addr" "$port" </dev/null >/dev/null 2>&1 &
+    echo $! >>"$FAKE_DIR/proxy.pids"
+    disown
+    exit 0
+  fi
   printf '%s\n' "$@" >"$FAKE_DIR/run.args"
   ;;
 esac

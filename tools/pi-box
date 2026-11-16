@@ -42,13 +42,13 @@
 #   PI_BOX_HOME         host dir for the box's own pi config/state (default ~/.pi-box)
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
-#   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
+#   LOCAL_LLM_API_KEY   host API key; proxy rules can declare a fake client env
 #   PI_BOX_DEFAULT      default provider/model, e.g. "local/<preset>" or
 #                       "opencode-go/minimax-m2.7". Without it, --sync points the
 #                       default at the first model the server reports (the pool
 #                       lists its preloaded presets first), overwriting a model
 #                       saved in the box with Ctrl+S.
-#   OPENCODE_API_KEY    passed through for OpenCode Go/Zen (built into pi)
+#   OPENCODE_API_KEY    Go/Zen key; use the proxy rule's fake_env to mask it
 #   PI_BOX_SEARCH       1: enable Tavily web search / fetch tools (same as --search)
 #   TAVILY_API_KEY      passed through when search is enabled (@tavily/pi-extension)
 #   PI_BOX_HIDE         comma-separated provider ids to hide from /model
@@ -161,7 +161,7 @@ cfg = json.loads(mpath.read_text()) if mpath.is_file() else {}
 prov = cfg.setdefault("providers", {}).setdefault("local", {})
 prov["baseUrl"] = base
 prov.setdefault("api", "openai-completions")
-prov.setdefault("apiKey", "$LOCAL_LLM_API_KEY")   # resolved by pi at request time
+prov["apiKey"] = "$LOCAL_LLM_API_KEY"   # resolved by pi at request time
 prov.setdefault("compat", {"supportsDeveloperRole": False,
                            "supportsReasoningEffort": False})
 prov["models"] = models
@@ -196,7 +196,7 @@ PYEOF
 ensure_settings() {
   # Runs every launch. Makes sure pi-hide-providers is listed in settings.json,
   # manages @tavily/pi-extension based on whether --search was passed, and
-  # writes the hide rules from PI_BOX_HIDE. Does not touch models.
+  # writes the hide rules from PI_BOX_HIDE and migrates the managed API key.
   mkdir -p "$PI_AGENT_HOME"
   PI_AGENT_HOME="$PI_AGENT_HOME" PI_PACKAGES="$PI_PACKAGES" PI_BOX_HIDE="${PI_BOX_HIDE-opencode}" \
     PI_BOX_SEARCH="$(box_knob SEARCH)" python3 - <<'PYEOF'
@@ -204,6 +204,14 @@ import json, os
 from pathlib import Path
 
 home = Path(os.environ["PI_AGENT_HOME"])
+
+mpath = home / "models.json"
+if mpath.is_file():
+    cfg = json.loads(mpath.read_text())
+    prov = (cfg.get("providers") or {}).get("local")
+    if prov is not None and prov.get("apiKey") != "$LOCAL_LLM_API_KEY":
+        prov["apiKey"] = "$LOCAL_LLM_API_KEY"
+        mpath.write_text(json.dumps(cfg, indent=2) + "\n")
 
 spath = home / "settings.json"
 settings = json.loads(spath.read_text()) if spath.is_file() else {}

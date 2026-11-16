@@ -32,6 +32,10 @@ load_lib() {
   BOX_KEEP=(.claude)
   # shellcheck source=../agent-box-lib.bash
   source "$TOOLS/agent-box-lib.bash"
+  # The proxy is on by default now; a test that calls box_run_args or
+  # box_run_args' helpers directly says so here, and one that wants it sets
+  # CL_BOX_PROXY=1 (or passes --proxy through the CLI).
+  : "${CL_BOX_PROXY:=0}"
   # The lib queues cleanups behind its own EXIT trap, which would replace
   # bats' and make a failing test vanish from the report ("Executed 0 instead
   # of expected 1 tests") instead of failing. Queue them only; teardown runs
@@ -40,6 +44,9 @@ load_lib() {
 }
 
 teardown() {
+  if [[ -f $FAKE_DIR/proxy.pids ]]; then
+    while read -r pid; do kill "$pid" 2>/dev/null || :; done <"$FAKE_DIR/proxy.pids"
+  fi
   # in an if: _box_run_at_exit returns the status it was called with
   if declare -F _box_run_at_exit >/dev/null; then
     _box_run_at_exit
@@ -47,9 +54,13 @@ teardown() {
 }
 
 # claude-box against the stubs; what it passed to `run` is in run.args.
+# The proxy is on by default, so a test that isn't about it says --no-proxy
+# first; fence tests omit that default so an explicit --no-proxy stays an error.
 # BOX_TEST_BASH picks the bash it runs under, e.g. macOS's own /bin/bash 3.2.
 run_box() {
-  run "${BOX_TEST_BASH:-bash}" "$TOOLS/claude-box" "$@"
+  local a proxy=(--no-proxy)
+  for a in "$@"; do [[ $a != --fence ]] || proxy=(); done
+  run "${BOX_TEST_BASH:-bash}" "$TOOLS/claude-box" ${proxy[@]+"${proxy[@]}"} "$@"
 }
 
 # run_has ARG [NEXT]: `run` got ARG (followed by NEXT).

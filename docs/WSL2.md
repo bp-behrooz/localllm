@@ -97,11 +97,16 @@ eval "$(ssh-agent)" && ssh-add
 gh auth login          # optional: --ssh passes its token too
 ```
 
+Configure the allow-list using the [proxy guide](../tools/proxy.md).
+Proxying and fencing default on, but fencing is not implemented for WSL2.
+Opt out explicitly with `--no-fence`: the proxy still injects credentials,
+but applications can bypass its allow-list using direct connections.
+
 Then, from a project:
 
 ```sh
-~/localllm/tools/claude-box --shell -c 'git status'   # a quick check
-~/localllm/tools/claude-box
+~/localllm/tools/claude-box --no-fence --shell -c 'git status'   # a quick check
+~/localllm/tools/claude-box --no-fence
 ```
 
 ## krun instead

@@ -778,7 +778,7 @@ json.dump(s, open(p, "w"))'
 pi_run() {
   export PI_BOX_HOME="$BATS_TEST_TMPDIR/pi-home" PI_BOX_RUNTIME=crun \
     LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
-  run bash "$TOOLS/pi-box" "$@"
+  run bash "$TOOLS/pi-box" --no-proxy "$@"
 }
 
 # the packages settings.json lists, one per line
@@ -804,7 +804,7 @@ print("\n".join(s["packages"]))'
   echo '{"packages": ["git:github.com/DietrichGebert/ponytail", "npm:pi-hide-providers",
     "npm:@tavily/pi-extension", "npm:something-else"]}' \
     >"$BATS_TEST_TMPDIR/pi-home/.pi/agent/settings.json"
-  touch "$BATS_TEST_TMPDIR/pi-home/.pi/agent/models.json"
+  echo '{}' >"$BATS_TEST_TMPDIR/pi-home/.pi/agent/models.json"
   pi_run --shell -c true
   [[ $status -eq 0 ]]
   [[ $(pi_packages) == "/opt/pi-packages/node_modules/@dietrichgebert/ponytail
@@ -927,7 +927,7 @@ assert "model" not in cfg, "a pin here would outrank the recent models"'
 oc_run() {
   export OC_BOX_HOME="$BATS_TEST_TMPDIR/oc-home" OC_BOX_RUNTIME=crun \
     LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
-  run bash "$TOOLS/opencode-box" "$@"
+  run bash "$TOOLS/opencode-box" --no-proxy "$@"
 }
 
 # what the config pins web search to: {"provider":...} or false
@@ -1032,7 +1032,7 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   git -C origin_repo update-ref refs/pull/42/head HEAD
 
   llm_serve qwen3-coder
-  export OCR_BOX_HOME="$BATS_TEST_TMPDIR/ocr-home" OCR_BOX_RUNTIME=crun \
+  export OCR_BOX_HOME="$BATS_TEST_TMPDIR/ocr-home" OCR_BOX_RUNTIME=crun OCR_BOX_PROXY=0 \
     LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=sk-test
   cd myproj
   local mb cd_file="$BATS_TEST_TMPDIR/cd_target"
@@ -1225,4 +1225,440 @@ EOF
   run _box_gh_env
   [[ $status -eq 1 ]]
   [[ $output == *"gh auth login"* ]]
+}
+
+# ------------------------------------------------------------------ proxy -----
+# A stub that takes the port box-proxy was given and listens on it, so the
+# launch's readiness check passes without mitmproxy installed.
+proxy_stub() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat >"$BATS_TEST_TMPDIR/bin/proxy-stub" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE_DIR/proxy.calls"
+addr=${5:?}
+exec python3 -c 'import socket,sys,time
+a, _, p = sys.argv[1].rpartition(":")
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((a or "127.0.0.1", int(p))); s.listen(); time.sleep(30)' "$addr"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/proxy-stub"
+  export BOX_PROXY_CMD="$BATS_TEST_TMPDIR/bin/proxy-stub"
+  # A CA of this launch's own, and the label a matching image would carry.
+  export BOX_PROXY_CONFDIR="$BATS_TEST_TMPDIR/mitm"
+  mkdir -p "$BOX_PROXY_CONFDIR"
+  printf -- '-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n' \
+    >"$BOX_PROXY_CONFDIR/mitmproxy-ca-cert.pem"
+  if command -v sha256sum >/dev/null 2>&1; then
+    export FAKE_CA_STAMP="$(sha256sum "$BOX_PROXY_CONFDIR/mitmproxy-ca-cert.pem" | cut -c1-16)"
+  else
+    export FAKE_CA_STAMP="$(shasum -a 256 "$BOX_PROXY_CONFDIR/mitmproxy-ca-cert.pem" | cut -c1-16)"
+  fi
+}
+
+@test "proxy: --no-fence publishes the proxy without enforcing egress" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":["api.github.com"],"rules":[{"host":"api.github.com","header":"authorization","with":"Bearer {cmd:printf tok}","fake_env":[]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q -- ':/etc/box-proxy:ro$' "$FAKE_DIR/proxy.args"
+  grep -qx -- 'BOX_PROXY_CONFIG=/etc/box-proxy/proxy.json' "$FAKE_DIR/proxy.args"
+  grep -q -- 'regular@0.0.0.0:8080' "$FAKE_DIR/proxy.args"
+  local port
+  port=$(sed -n 's|^127\.0\.0\.1:\([0-9]*\):8080$|\1|p' "$FAKE_DIR/proxy.args")
+  [[ -n $port ]]
+  grep -q "^HTTPS_PROXY=http://127.0.0.1:$port$" "$FAKE_DIR/run.args"
+  grep -q '^BOX_SESSION=' "$FAKE_DIR/run.args"
+  run_has --network "pasta:-T,$port"
+}
+
+@test "proxy: --proxy without a config stops before anything runs" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  run_box --proxy="$BATS_TEST_TMPDIR/nope.json" --shell -c true
+  [[ $status -ne 0 && $output == *"no config at"* ]]
+  [[ ! -f $FAKE_DIR/run.args ]]
+}
+
+@test "proxy: proxy and fence default on, and --no-proxy opts out of both" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$HOME/.box.default.proxy.json"
+  local platform
+  for platform in as_linux as_mac; do
+    "$platform"
+    : >"$FAKE_DIR/calls"
+    run bash "$TOOLS/claude-box" --shell -c true
+    [[ $status -eq 0 ]]
+    call_has 'network create --internal'
+    grep -qx 'HTTPS_PROXY=http://127.0.0.2:8080' "$FAKE_DIR/run.args"
+    : >"$FAKE_DIR/calls"
+    run bash "$TOOLS/claude-box" --no-proxy --shell -c true
+    [[ $status -eq 0 ]]
+    ! grep -q '^HTTPS_PROXY=' "$FAKE_DIR/run.args"
+    call_lacks 'network create'
+  done
+}
+
+@test "proxy: an explicit proxy path enables fencing unless the knob opts out" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  call_has 'network create --internal'
+  : >"$FAKE_DIR/calls"
+  CL_BOX_FENCE=0 run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  call_lacks 'network create --internal'
+  grep -q '^HTTPS_PROXY=http://127.0.0.1:' "$FAKE_DIR/run.args"
+}
+
+@test "proxy: only declared fake envs are supplied, without inferring host names" {
+  llm_serve qwen3-coder
+  proxy_stub
+  echo '{"allow":["llm.example.com"],"rules":[{"host":"llm.example.com","path":"/a","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":["ALT_CLIENT_TOKEN"]},{"host":"llm.example.com","path":"/b","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":["ALT_CLIENT_TOKEN"]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  oc_run --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --env ALT_CLIENT_TOKEN=box-proxy-placeholder
+  [[ $(grep -cx ALT_CLIENT_TOKEN=box-proxy-placeholder "$FAKE_DIR/run.args") -eq 1 ]]
+  run_has --env LOCAL_LLM_API_KEY
+  run_has --env OPENCODE_API_KEY
+  run_lacks LOCAL_LLM_API_KEY=box-proxy-placeholder
+  run_lacks OPENCODE_API_KEY=box-proxy-placeholder
+  run_lacks BQ_TOKEN=box-proxy-placeholder
+  run_lacks CLOUDSDK_AUTH_ACCESS_TOKEN=box-proxy-placeholder
+}
+
+@test "proxy: final env filtering covers wrappers and preserves client arguments" {
+  load_lib
+  BOX_CTR=(podman)
+  BOX_FAKE_ENV=(CUSTOM_TOKEN GH_TOKEN UNSET_TOKEN)
+  export CUSTOM_TOKEN=host-secret GH_TOKEN=gh-secret
+  local mode
+  for mode in 0 1; do
+    BOX_SHELL=$mode
+    box_run --env CUSTOM_TOKEN --env CUSTOM_TOKEN=inline-secret \
+      --env=CUSTOM_TOKEN=equals-secret -e GH_TOKEN -eGH_TOKEN=short-secret \
+      --env UNLISTED=keep "$BOX_IMAGE" --env CUSTOM_TOKEN=client-argument
+    run_has --env CUSTOM_TOKEN=box-proxy-placeholder
+    run_has --env=CUSTOM_TOKEN=box-proxy-placeholder
+    run_has -e GH_TOKEN=box-proxy-placeholder
+    run_has -eGH_TOKEN=box-proxy-placeholder
+    run_has --env UNSET_TOKEN=box-proxy-placeholder
+    run_has --env UNLISTED=keep
+    run_has --env CUSTOM_TOKEN=client-argument
+    run_lacks CUSTOM_TOKEN
+    run_lacks GH_TOKEN
+    ! grep -Eq 'host-secret|gh-secret|inline-secret|equals-secret|short-secret' "$FAKE_DIR/run.args"
+    [[ $CUSTOM_TOKEN == host-secret && $GH_TOKEN == gh-secret ]]
+  done
+  CL_BOX_PROXY=0 _box_proxy_start
+  [[ ${#BOX_FAKE_ENV[@]} -eq 0 ]]
+  box_run --env CUSTOM_TOKEN "$BOX_IMAGE"
+  run_has --env CUSTOM_TOKEN
+  run_lacks CUSTOM_TOKEN=box-proxy-placeholder
+}
+
+@test "proxy: declarations mask tokens selected by either gh passthrough flag" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  fake_secret_tool
+  "$TOOLS/box-gh-token" set <<<"repo-real"
+  printf '#!/bin/sh\nprintf host-real\n' >"$BATS_TEST_TMPDIR/bin/gh"
+  chmod +x "$BATS_TEST_TMPDIR/bin/gh"
+  echo '{"allow":["api.github.com"],"rules":[{"host":"api.github.com","with":"Bearer {env:GH_TOKEN}","fake_env":["GH_TOKEN"]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  local flag
+  for flag in --gh --gh=host; do
+    run_box "$flag" --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+    [[ $status -eq 0 ]]
+    run_has --env GH_TOKEN=box-proxy-placeholder
+    run_lacks GH_TOKEN
+    run_box "$flag" --no-proxy --shell -c true
+    [[ $status -eq 0 ]]
+    run_has --env GH_TOKEN
+    run_lacks GH_TOKEN=box-proxy-placeholder
+  done
+}
+
+@test "proxy: profile credentials stay on the host and bq gets a fake token" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  cat >"$HOME/.box.default.env" <<'EOF'
+export LOCAL_LLM_API_KEY=local-real
+export OPENCODE_API_KEY=go-real
+export BQ_TOKEN=bq-real
+export CLOUDSDK_AUTH_ACCESS_TOKEN=cloud-real
+export CUSTOM_TOKEN=custom-real
+export UNRELATED=keep-me
+EOF
+  cat >"$HOME/.box.default.down" <<'EOF'
+printf '%s\n' "$LOCAL_LLM_API_KEY" "$OPENCODE_API_KEY" "$BQ_TOKEN" "$CLOUDSDK_AUTH_ACCESS_TOKEN" >"$FAKE_DIR/host-keys"
+EOF
+  echo '{"allow":["llm.example.com"],"rules":[{"host":"llm.example.com","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":["LOCAL_LLM_API_KEY","OPENCODE_API_KEY","BQ_TOKEN","CLOUDSDK_AUTH_ACCESS_TOKEN","CUSTOM_TOKEN","UNSET_TOKEN"]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  local var
+  for var in LOCAL_LLM_API_KEY OPENCODE_API_KEY BQ_TOKEN CLOUDSDK_AUTH_ACCESS_TOKEN CUSTOM_TOKEN UNSET_TOKEN; do
+    run_has --env "$var=box-proxy-placeholder"
+    run_lacks "$var"
+  done
+  run_has --env UNRELATED
+  ! grep -Eq 'local-real|go-real|bq-real|cloud-real|custom-real' "$FAKE_DIR/run.args"
+  [[ $(<"$FAKE_DIR/host-keys") == $'local-real\ngo-real\nbq-real\ncloud-real' ]]
+  run_box --no-proxy --shell -c true
+  [[ $status -eq 0 ]]
+  for var in LOCAL_LLM_API_KEY OPENCODE_API_KEY BQ_TOKEN CLOUDSDK_AUTH_ACCESS_TOKEN CUSTOM_TOKEN; do
+    run_has --env "$var"
+    run_lacks "$var=box-proxy-placeholder"
+  done
+  run_lacks UNSET_TOKEN=box-proxy-placeholder
+}
+
+@test "proxy: LLM clients get fake envs and migrate managed literal keys" {
+  llm_serve qwen3-coder
+  proxy_stub
+  export OPENCODE_API_KEY=go-real
+  echo '{"allow":["llm.example.com","opencode.ai"],"rules":[{"host":"llm.example.com","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":["LOCAL_LLM_API_KEY"]},{"host":"opencode.ai","with":"Bearer {env:OPENCODE_API_KEY}","fake_env":["OPENCODE_API_KEY"]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  local agent
+  # Seed through the real sync commands, then simulate older inline-key configs.
+  pi_sync
+  [[ $status -eq 0 ]]
+  oc_sync
+  [[ $status -eq 0 ]]
+  python3 - "$PI_BOX_HOME/.pi/agent/models.json" "$OC_BOX_HOME/.config/opencode/opencode.json" <<'PY'
+import json, sys
+for path, root, provider, key in ((sys.argv[1], "providers", "local", "apiKey"),
+                                  (sys.argv[2], "provider", "localllm", "options")):
+    cfg = json.load(open(path))
+    p = cfg[root][provider]
+    if key == "options":
+        p["options"]["apiKey"] = "legacy-local-key"
+    else:
+        p[key] = "legacy-local-key"
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+PY
+  for agent in pi oc; do
+    "${agent}_run" --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+    [[ $status -eq 0 ]]
+    run_has --env LOCAL_LLM_API_KEY=box-proxy-placeholder
+    run_has --env OPENCODE_API_KEY=box-proxy-placeholder
+    run_lacks LOCAL_LLM_API_KEY
+    run_lacks OPENCODE_API_KEY
+    "${agent}_run" --shell -c true
+    [[ $status -eq 0 ]]
+    run_has --env LOCAL_LLM_API_KEY
+    run_has --env OPENCODE_API_KEY
+  done
+  ! grep -q legacy-local-key "$PI_BOX_HOME/.pi/agent/models.json"
+  ! grep -q legacy-local-key "$OC_BOX_HOME/.config/opencode/opencode.json"
+}
+
+@test "proxy: OCR's managed config follows the declared fake env" {
+  llm_serve qwen3-coder
+  proxy_stub
+  export OCR_BOX_HOME="$BATS_TEST_TMPDIR/ocr-home" OCR_BOX_RUNTIME=crun \
+    LOCAL_LLM_URL="file://$BATS_TEST_TMPDIR/llm/v1" LOCAL_LLM_API_KEY=local-real
+  echo '{"allow":["llm.example.com"],"rules":[{"host":"llm.example.com","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":[]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run bash "$TOOLS/ocr-box" --sync-only
+  [[ $status -eq 0 ]]
+  local config="$OCR_BOX_HOME/.opencodereview/config.json"
+  ! grep -q '"api_key"' "$config"
+  ! grep -q local-real "$config"
+  run bash "$TOOLS/ocr-box" --no-proxy --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q local-real "$config"
+  run bash "$TOOLS/ocr-box" --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q local-real "$config"
+  echo '{"allow":["llm.example.com"],"rules":[{"host":"llm.example.com","with":"Bearer {env:LOCAL_LLM_API_KEY}","fake_env":["LOCAL_LLM_API_KEY"]}]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run bash "$TOOLS/ocr-box" --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q box-proxy-placeholder "$config"
+  ! grep -q local-real "$config"
+  run env -u LOCAL_LLM_API_KEY bash "$TOOLS/ocr-box" --no-proxy --shell -c true
+  [[ $status -ne 0 && $output == *"LOCAL_LLM_API_KEY is unset and no active fake_env"* ]]
+}
+
+@test "proxy: quoted tilde config paths expand on the host" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$HOME/custom.proxy.json"
+  run_box '--proxy=~/custom.proxy.json' --shell -c true
+  [[ $status -eq 0 ]]
+}
+
+@test "proxy: journal directories are resolved and created, but not broad mounts" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  mkdir -p "$BATS_TEST_TMPDIR/project"
+  cd "$BATS_TEST_TMPDIR/project"
+  echo '{"allow":"none","journal":{"path":"logs/calls.jsonl"}}' >proxy.json
+  run_box --proxy=proxy.json --shell -c true
+  [[ $status -eq 0 && -d $PWD/logs ]]
+  grep -qx -- "$PWD/logs:/var/journal" "$FAKE_DIR/proxy.args"
+  echo '{"allow":"none","journal":{"path":"calls.jsonl"}}' >proxy.json
+  run_box --proxy=proxy.json --shell -c true
+  [[ $status -eq 0 ]]
+  grep -qx -- "$PWD:/var/journal" "$FAKE_DIR/proxy.args"
+  local path
+  for path in '~/calls.jsonl' /calls.jsonl; do
+    printf '{"allow":"none","journal":{"path":"%s"}}' "$path" >proxy.json
+    run_box --proxy=proxy.json --shell -c true
+    [[ $status -ne 0 && $output == *"dedicated directory"* ]]
+  done
+}
+
+# --------------------------------------------------------------- box-proxy ----
+@test "box-proxy: security and parser regressions" {
+  run python3 "$BATS_TEST_DIRNAME/box_proxy_unit.py"
+  [[ $status -eq 0 ]] || { echo "$output"; false; }
+}
+
+# The proxy itself, end to end over TLS. Needs mitmproxy on PATH; the rest of
+# the suite runs without it.
+@test "box-proxy: rewrites, refuses, answers and journals" {
+  command -v mitmdump >/dev/null || skip "mitmdump is not on PATH"
+  run python3 "$BATS_TEST_DIRNAME/box_proxy_e2e.py"
+  [[ $status -eq 0 ]] || {
+    echo "$output"
+    false
+  }
+}
+
+@test "fence: the box sits on an internal network and the proxy is its only way out" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
+  [[ $status -eq 0 ]]
+  call_has "network create --internal cl-net-"
+  local net
+  net=$(sed -n 's/^podman network create --internal \(.*\)$/\1/p' "$FAKE_DIR/calls")
+  [[ -n $net ]]
+  # the box is on it, and the proxy is the only container on both it and the
+  # default network
+  run_has --network "$net"
+  grep -qx -- "$net" "$FAKE_DIR/proxy.args"
+  grep -qx -- podman "$FAKE_DIR/proxy.args"
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/proxy.args") == "podman"$'\n'"$net" ]]
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args") == "$net" ]]
+  ! grep -q '^127\.0\.0\.1:' "$FAKE_DIR/proxy.args"
+  grep -q "^HTTPS_PROXY=http://127.0.0.2:8080$" "$FAKE_DIR/run.args"
+}
+
+@test "fence: --fence brings the proxy, and uses the profile's config" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  run_box --fence --shell -c true
+  [[ $status -ne 0 && $output == *"no config at"*".box.default.proxy.json"* ]]
+  echo '{"allow":"none"}' >"$HOME/.box.default.proxy.json"
+  run_box --fence --shell -c true
+  [[ $status -eq 0 ]]
+  call_has "network create --internal cl-net-"
+  grep -q "^HTTPS_PROXY=http://127.0.0.2:8080$" "$FAKE_DIR/run.args"
+}
+
+@test "fence: explicit proxy opt-outs are refused in either flag order" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  run_box --no-proxy --fence --shell -c true
+  [[ $status -ne 0 && $output == *"--fence needs a proxy"* ]]
+  run_box --fence --no-proxy --shell -c true
+  [[ $status -ne 0 && $output == *"--fence needs a proxy"* ]]
+  CL_BOX_PROXY=no run_box --fence --shell -c true
+  [[ $status -ne 0 && $output == *"--fence needs a proxy"* ]]
+}
+
+@test "fence: podman inspect only reports attached networks" {
+  printf '%s\n' --network right-net >"$FAKE_DIR/proxy.args"
+  run podman inspect --format '{{(index .NetworkSettings.Networks "wrong-net").IPAddress}}' proxy
+  [[ $status -eq 0 && -z $output ]]
+  run podman inspect --format '{{(index .NetworkSettings.Networks "right-net").IPAddress}}' proxy
+  [[ $status -eq 0 && $output == 127.0.0.2 ]]
+}
+
+@test "fence: another way out is refused" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --host-port=5432 --shell -c true
+  [[ $status -ne 0 && $output == *"leaves no way out"* ]]
+}
+
+@test "fence: unsupported runtimes fail closed unless explicitly opted out" {
+  load_lib
+  BOX_CTR=(podman)
+  CL_BOX_PROXY=1 CL_BOX_RUNTIME=krun
+  run _box_fence_start
+  [[ $status -ne 0 && $output == *"plain container"* && $output == *"--no-fence"* ]]
+  box_parse_args --no-fence
+  run _box_fence_start
+  [[ $status -eq 0 ]]
+  as_wsl
+  CL_BOX_FENCE=1 CL_BOX_RUNTIME=crun
+  run _box_fence_start
+  [[ $status -ne 0 && $output == *"WSL2"* && $output == *"--no-fence"* ]]
+}
+
+@test "proxy: an image built with another CA is refused" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":[]}' >"$BATS_TEST_TMPDIR/proxy.json"
+  FAKE_CA_STAMP=deadbeefdeadbeef run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -ne 0 && $output == *"built with another CA"* ]]
+  [[ ! -f $FAKE_DIR/proxy.args ]]
+}
+
+@test "fence: on a Mac the box gets a host-only network and the proxy's address" {
+  as_mac
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
+  [[ $status -eq 0 ]]
+  call_has "network create --internal cl-net-"
+  local net
+  net=$(sed -n 's/^container network create --internal \(.*\)$/\1/p' "$FAKE_DIR/calls")
+  [[ -n $net ]]
+  run_has --network "$net"
+  # the proxy is on the fence network and on the default one, the box only on
+  # the fence
+  grep -qx -- "$net" "$FAKE_DIR/proxy.args"
+  grep -qx -- default "$FAKE_DIR/proxy.args"
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/proxy.args") == "default"$'\n'"$net" ]]
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args") == "$net" ]]
+  grep -q "^HTTPS_PROXY=http://127.0.0.2:8080$" "$FAKE_DIR/run.args"
+}
+
+@test "proxy: an address that never appears stops the launch with its log" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  local platform
+  for platform in as_linux as_mac; do
+    "$platform"
+    FAKE_NO_IP=1 run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
+    [[ $status -ne 0 ]]
+    [[ $output == *"has no address"* ]]
+    [[ $output == *"logs"* ]]
+  done
+}
+
+
+@test "proxy: --no-fence on a Mac uses a plain shared network" {
+  as_mac
+  proxy_stub
+  echo '{"allow":"all"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  call_has "network create cl-net-"
+  local net
+  net=$(sed -n 's/^container network create \(cl-net-.*\)$/\1/p' "$FAKE_DIR/calls")
+  [[ -n $net ]]
+  # one network is both the way to the proxy and the way out
+  run_has --network "$net"
+  run_lacks default
+  grep -qx -- "$net" "$FAKE_DIR/proxy.args"
+  grep -q "^HTTPS_PROXY=http://127.0.0.2:8080$" "$FAKE_DIR/run.args"
 }

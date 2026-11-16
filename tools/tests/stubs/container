@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Stands in for Apple's container CLI, as stubs/podman does for podman.
+# Stands in for Apple's container CLI, as stubs/podman does for podman. A run
+# of the proxy container (its name holds -proxy-) is recorded in
+# $FAKE_DIR/proxy.args and listens where the launch will look for it.
 if [[ $1 == run && $* == *"--entrypoint npm"* ]]; then
   [[ -z ${FAKE_AGENT_VERSION-} ]] || echo "\`-- ${*: -1}@$FAKE_AGENT_VERSION"
   exit 0
@@ -7,7 +9,27 @@ fi
 echo "container $*" >>"$FAKE_DIR/calls"
 case $1 in
 image)
-  [[ $2 == inspect ]] && echo "[{\"config\":{\"labels\":{\"agent-box.entry\":\"${FAKE_ENTRY:-7}\"}}}]"
+  [[ $2 == inspect ]] && echo "[{\"config\":{\"labels\":{\"agent-box.entry\":\"${FAKE_ENTRY:-7}\",\"agent-box.ca\":\"${FAKE_CA_STAMP-}\"}}}]"
+  ;;
+network)
+  # create --internal NAME / delete NAME: the call itself is in $FAKE_DIR/calls,
+  # which is what the tests read
+  ;;
+inspect)
+  # the networks the proxy container is on. The stub listens on the address it
+  # reports, since the host has to be able to dial it for the launch to go on.
+  [[ -z ${FAKE_NO_IP-} ]] || { echo "[]"; exit 0; }
+  python3 - "$FAKE_DIR/proxy.args" <<'EOF'
+import json, sys
+try:
+    args = open(sys.argv[1]).read().splitlines()
+except OSError:
+    args = []
+nets = [args[i + 1] for i, a in enumerate(args) if a == "--network" and i + 1 < len(args)]
+# the field is "network", as container inspect prints it
+print(json.dumps([{"status": {"networks": [
+    {"network": n, "ipv4Address": "127.0.0.2/32"} for n in nets]}}]))
+EOF
   ;;
 ls)
   # the box `run` started, while it runs, at $FAKE_BOX_IP
@@ -17,6 +39,31 @@ ls)
   ;;
 run)
   shift
+  name= prev=
+  for arg in "$@"; do
+    [[ $prev != --name ]] || name=$arg
+    prev=$arg
+  done
+  if [[ $name == *-proxy-* ]]; then
+    printf '%s\n' "$@" >"$FAKE_DIR/proxy.args"
+    # -p <host-ip>:<host-port>:8080 decides where it listens; the launch dials
+    # that address, so the stub has to be there. Otherwise the address it
+    # reports from inspect.
+    addr=127.0.0.2 port=8080 prev=
+    for a in "$@"; do
+      if [[ $prev == -p && $a =~ ^([0-9.]+):([0-9]+):8080$ ]]; then
+        addr=${BASH_REMATCH[1]} port=${BASH_REMATCH[2]}
+      fi
+      prev=$a
+    done
+    nohup python3 -c 'import socket,sys,time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2]))); s.listen(); time.sleep(300)' "$addr" "$port" \
+      </dev/null >/dev/null 2>&1 &
+    echo $! >>"$FAKE_DIR/proxy.pids"
+    disown
+    exit 0
+  fi
   printf '%s\n' "$@" >"$FAKE_DIR/run.args"
   # a box that stays up a moment, for what the launch starts beside it
   [[ -z ${FAKE_RUN_SLEEP-} ]] || sleep "$FAKE_RUN_SLEEP"

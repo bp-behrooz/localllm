@@ -92,7 +92,8 @@ _box_ports() {
 # ----------------------------------------------------------------- flags -----
 # Parses common flags shared by all boxes:
 #   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh[=host], --docker, --search,
-#   --host-port <port>, --profile[=NAME], --shell
+#   --host-port <port>, --proxy[=PATH], --no-proxy, --fence, --no-fence,
+#   --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
 # the whole command; with --rebuild or --build-only it runs first and the build
 # follows (see box_clean_or_exit). --host-port takes a port or a comma-separated
@@ -167,6 +168,26 @@ box_parse_args() {
       ;;
     --search)
       printf -v "${BOX_ENV_PREFIX}_SEARCH" '%s' 1
+      shift
+      ;;
+    --proxy)
+      printf -v "${BOX_ENV_PREFIX}_PROXY" '%s' 1
+      shift
+      ;;
+    --proxy=*)
+      printf -v "${BOX_ENV_PREFIX}_PROXY" '%s' "${1#--proxy=}"
+      shift
+      ;;
+    --no-proxy)
+      printf -v "${BOX_ENV_PREFIX}_PROXY" '%s' 0
+      shift
+      ;;
+    --fence)
+      printf -v "${BOX_ENV_PREFIX}_FENCE" '%s' 1
+      shift
+      ;;
+    --no-fence)
+      printf -v "${BOX_ENV_PREFIX}_FENCE" '%s' 0
       shift
       ;;
     --profile)
@@ -359,6 +380,51 @@ box_remove_images() {
   container image prune >/dev/null 2>&1 || true
 }
 
+# The proxy's CA. It is made on first use -- by the first image build that needs
+# it, or by a launch -- so nothing has to remember that step. The certificate is
+# public and goes into the image; the key stays in ~/.config/agent-box/mitm and
+# never enters one. A label records which CA an image was built with, and a
+# launch refuses an image built with another, since every TLS request through
+# the proxy would fail in a way that reads like a network problem.
+_box_ca_dir() { printf '%s' "${BOX_PROXY_CONFDIR:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-box/mitm}"; }
+_box_ca_cert() { printf '%s/mitmproxy-ca-cert.pem' "$(_box_ca_dir)"; }
+
+_box_ca_stamp() {
+  local cert
+  cert="$(_box_ca_cert)"
+  [[ -f $cert ]] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$cert" | cut -c1-16
+  else
+    shasum -a 256 "$cert" | cut -c1-16
+  fi
+}
+
+_box_ca_ensure() {
+  [[ -f "$(_box_ca_cert)" ]] && return 0
+  mkdir -p "$(_box_ca_dir)"
+  "$BOX_LIB_DIR/box-proxy" ca --confdir "$(_box_ca_dir)" >/dev/null || {
+    echo "error: could not create the proxy CA; openssl has to be installed" >&2
+    exit 1
+  }
+  echo "==> proxy: made a CA in $(_box_ca_dir)" >&2
+}
+
+_box_dockerfile_ca() {
+  local cert
+  _box_ca_ensure
+  cert="$(_box_ca_cert)"
+  [[ -f $cert ]] || return 0
+  printf '%s\n' \
+    "RUN printf '%s' '$(base64 <"$cert" | tr -d '\n')' | base64 -d >/usr/local/share/ca-certificates/box-proxy.crt \\" \
+    " && update-ca-certificates" \
+    "# requests and httpx carry certifi's own bundle, and Node its own roots;" \
+    "# both honour these, and so does nothing that already reads the system store." \
+    "ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \\" \
+    "    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt" \
+    "LABEL agent-box.ca=$(_box_ca_stamp)"
+}
+
 # The base every box shares. Written from a quoted heredoc, so it lands in the
 # Dockerfile verbatim — no doubled backslashes, no escaped $(...).
 box_dockerfile_base() {
@@ -447,6 +513,7 @@ RUN mkdir -p /etc/box-entry.d /etc/box-exit.d \
 LABEL agent-box.entry=8
 
 EOF
+  _box_dockerfile_ca
 }
 
 # Your own additions to the image, appended after the agent's tail:
@@ -1089,6 +1156,19 @@ box_docker_bridge() {
   echo "==> docker: $sock -> tcp://$addr:$BOX_BRIDGE_PORT (this session only)" >&2
 }
 
+# A label that isn't a number -- the CA stamp. Empty when the image has none.
+_box_image_text_label() {
+  local val
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    val="$(podman image inspect --format "{{index .Config.Labels \"$1\"}}" "$BOX_IMAGE" 2>/dev/null)"
+    [[ $val != "<no value>" ]] || val=
+  else
+    val="$(container image inspect "$BOX_IMAGE" 2>/dev/null |
+      sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p" | head -1)"
+  fi
+  printf '%s' "$val"
+}
+
 # ------------------------------------------------------------------ data -----
 # Service data persists where the Dockerfile additions say VOLUME: a named
 # volume is mounted there, one set per profile and project. The project is the
@@ -1164,6 +1244,365 @@ _box_data_volumes() {
   echo "==> data: $n volume(s), ${prefix}*" >&2
 }
 
+# ------------------------------------------------------------------ proxy -----
+_box_proxy_enabled() {
+  case "$(box_knob PROXY 1)" in 0 | no) return 1 ;; esac
+}
+
+# Keep host values intact for rendering, model sync, and credential refreshers.
+box_env() {
+  local name="${1%%=*}" var
+  for var in ${BOX_FAKE_ENV[@]+"${BOX_FAKE_ENV[@]}"}; do
+    if [[ $name == "$var" ]]; then
+      printf '%s=box-proxy-placeholder' "$name"
+      return
+    fi
+  done
+  printf '%s' "$1"
+}
+
+# --proxy runs box-proxy in a container of its own for this launch: the box
+# sends its traffic there, the proxy adds the credentials on the way out, and
+# every host its config doesn't name is refused. The box holds a placeholder,
+# or nothing at all.
+#
+# A container on both platforms: on a Mac a host process has no address the box
+# could reach, and keeping one shape is worth more than saving a container.
+# What differs is only how the box gets to it -- a published loopback port under
+# krun (whose pasta network reaches nothing else), the container's address on a
+# shared network elsewhere, the fence network's when --fence is on.
+#
+# The config is ~/.box.<profile>.proxy.json with --proxy, or the path with
+# --proxy=PATH. Secrets are rendered host-side (box-proxy render) into a
+# directory mounted read-only; `{cmd:...}` becomes a file a host-side refresher
+# keeps current, since the container has neither the keychain nor the cloud CLI.
+# What the proxy container runs: the CA into a writable place, then mitmdump.
+BOX_PROXY_SH='mkdir -p /tmp/mitm; cp /ca/*.pem /tmp/mitm/ 2>/dev/null; exec mitmdump -q --mode regular@0.0.0.0:8080 --set confdir=/tmp/mitm --set block_global=false -s /etc/box-proxy/addon.py'
+PROXY_SH=$BOX_PROXY_SH
+
+_box_proxy_start() {
+  local knob cfg dir script journal_dir name image port url host ip i allow_desc
+  BOX_FAKE_ENV=()
+  # On by default: the box's network goes through the proxy unless told
+  # otherwise, so a rule or the journal is a config change away rather than a
+  # flag away. --no-proxy is the way out.
+  knob="$(box_knob PROXY 1)"
+  [[ $knob != 0 && $knob != no ]] || return 0
+  BOX_SESSION="${BOX_SESSION:-$(date +%Y%m%d-%H%M)-$(basename "$PWD" | tr -c 'a-zA-Z0-9\n' '-')-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')}"
+  if [[ $knob == 1 ]]; then
+    cfg="$HOME/.box.$(box_knob PROFILE default).proxy.json"
+  else
+    cfg=$knob
+  fi
+  case $cfg in '~/'*) cfg="$HOME/${cfg#\~/}" ;; esac
+  [[ -f $cfg ]] || _box_proxy_no_config "$cfg"
+  _box_ca_ensure
+  local want have
+  want="$(_box_ca_stamp)"
+  have="$(_box_image_text_label agent-box.ca)"
+  [[ $want == "$have" ]] || {
+    echo "error: --proxy: $BOX_IMAGE was built with another CA ($have); its TLS" >&2
+    echo "       requests would fail. Rerun with --rebuild." >&2
+    exit 1
+  }
+  local metadata
+  metadata="$(python3 -c 'import json,os,sys
+c = json.load(open(sys.argv[1]))
+p = (c.get("journal") or {}).get("path")
+d = os.path.realpath(os.path.dirname(os.path.abspath(os.path.expanduser(p)))) if p else ""
+home = os.path.realpath(os.path.expanduser("~"))
+if d and os.path.commonpath([d, home]) == d:
+    sys.exit("box-proxy: journal needs a dedicated directory, not home or an ancestor")
+if d:
+    os.makedirs(d, mode=0o700, exist_ok=True)
+print(d)
+a = c.get("allow")
+print(a if isinstance(a, str) else ", ".join(map(str, a or [])))' "$cfg")" || exit 1
+  { read -r journal_dir; read -r allow_desc; } <<<"$metadata"
+  # Under $HOME, not TMPDIR: the container mounts this directory, and on macOS
+  # a bind mount has to be on a path the runtime shares with its VM.
+  dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/proxy/$BOX_SESSION"
+  mkdir -p "$dir"
+  script="$("$BOX_LIB_DIR/box-proxy" render --config "$cfg" --dir "$dir" \
+    --out "$dir/proxy.json" --session "$BOX_SESSION")" || {
+    echo "error: --proxy: could not render $cfg" >&2
+    exit 1
+  }
+  local fake_env
+  fake_env="$(python3 -c 'import json,sys
+c = json.load(open(sys.argv[1]))
+print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fake_env", [])})))' "$dir/proxy.json")" || exit 1
+  IFS=' ' read -ra BOX_FAKE_ENV <<<"$fake_env"
+  cp "$BOX_LIB_DIR/box-proxy-addon.py" "$dir/addon.py"
+  local refresh=
+  if [[ -n $script ]]; then
+    sh "$script" </dev/null >>"$dir/refresh.log" 2>&1 &
+    refresh=$!
+    _box_at_exit "kill $refresh 2>/dev/null; pkill -P $refresh 2>/dev/null"
+  fi
+  name="$BOX_NAME_PREFIX-proxy-$$"
+  _box_at_exit "${BOX_CTR[*]} rm -f '$name' >/dev/null 2>&1"
+  image="$(box_knob PROXY_IMAGE docker.io/mitmproxy/mitmproxy:12.3.1)"
+  local mitm="${BOX_PROXY_CONFDIR:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-box/mitm}"
+  mkdir -p "$mitm"
+  # A copy, not the confdir itself: mitmproxy may write to it, and the image's
+  # trust is built around the certificate, which must not change under it.
+  cp -R "$mitm" "$dir/mitm"
+  # No --rm: if the proxy dies, its log is the only evidence, and --rm takes
+  # the log with it. The exit trap removes it.
+  local args=(-d --name "$name"
+    -e BOX_PROXY_CONFIG=/etc/box-proxy/proxy.json
+    -v "$dir:/etc/box-proxy:ro"
+    -v "$dir/mitm:/ca:ro")
+  [[ -z $journal_dir ]] || args+=(-v "$journal_dir:/var/journal")
+
+  if [[ -n ${BOX_FENCE_NET-} ]]; then
+    # Apple takes the gateway and DNS from the first network: default first.
+    # Only the proxy joins both networks; the box stays on the internal one.
+    args+=(--network "$(_box_default_net)" --network "$BOX_FENCE_NET")
+  elif [[ ${BOX_CTR[0]} == podman ]]; then
+    # krun's pasta network reaches the host's loopback and nothing else, so the
+    # proxy is published there -- the same door --host-port uses.
+    _box_free_port 127.0.0.1
+    port=$BOX_FREE_PORT
+    _box_ports "$port"
+    args+=(--network podman -p "127.0.0.1:$port:8080")
+  else
+    # A Mac: containers on the default network cannot reach each other, and a
+    # published port is only forwarded to loopback (no host socket the box
+    # could dial). A network of their own is the one path both join, so the
+    # launch gets one -- the fence's when fenced, its own otherwise.
+    # Unfenced: one plain network provides both peer access and a route out.
+    BOX_PROXY_NET="$BOX_NAME_PREFIX-net-$$"
+    "${BOX_CTR[@]}" network create "$BOX_PROXY_NET" >/dev/null || {
+      echo "error: --proxy: could not create network $BOX_PROXY_NET" >&2
+      exit 1
+    }
+    _box_at_exit "${BOX_CTR[*]} network delete '$BOX_PROXY_NET' >/dev/null 2>&1"
+    BOX_RUN_ARGS+=(--network "$BOX_PROXY_NET")
+    args+=(--network "$BOX_PROXY_NET")
+  fi
+
+  if [[ "$(box_knob PROXY_PRINT)" == 1 ]]; then
+    # The exact command, to run by hand with -d removed so it stays in the
+    # foreground. The directory it mounts is left in place for it.
+    printf '# its files are in %s\n' "$dir" >&2
+    printf '%s ' "${BOX_CTR[@]}" run "${args[@]}" "$image" sh -c "$PROXY_SH" >&2
+    printf '\n' >&2
+    exit 1
+  fi
+  _box_at_exit "rm -rf '$dir'"
+  echo "==> proxy: starting $name" >&2
+  # `mitmdump` by name: the image's entrypoint execs whatever it is given, so a
+  # dash-first argument becomes an option to exec itself. The CA is copied out
+  # of its read-only mount into /tmp first, because mitmproxy writes its cert
+  # store into confdir and a bind mount is not writable from inside.
+  "${BOX_CTR[@]}" run "${args[@]}" "$image" sh -c "$PROXY_SH" >&2 || {
+    echo "error: --proxy: the proxy container did not start" >&2
+    exit 1
+  }
+
+  if [[ -n ${BOX_FENCE_NET-} ]]; then
+    # Fenced: the box is only on the fence network, so it needs the proxy's
+    # address there, and the host cannot dial it either.
+    ip="$(_box_container_ip "$name" "$BOX_FENCE_NET")" || ip=
+    [[ -n $ip ]] || _box_proxy_no_address "$name" "$BOX_FENCE_NET"
+    url="http://$ip:8080"
+    echo "==> proxy: $url (the box's address for it)" >&2
+  elif [[ ${BOX_CTR[0]} == container ]]; then
+    ip="$(_box_container_ip "$name" "$BOX_PROXY_NET")" || ip=
+    [[ -n $ip ]] || _box_proxy_no_address "$name" "$BOX_PROXY_NET"
+    url="http://$ip:8080"
+    echo "==> proxy: $url (the box's address for it on $BOX_PROXY_NET)" >&2
+    BOX_RUN_ARGS+=(--env "BOX_SESSION=$BOX_SESSION" \
+      --env "HTTPS_PROXY=$url" --env "HTTP_PROXY=$url" \
+      --env "https_proxy=$url" --env "http_proxy=$url" \
+      --env "NO_PROXY=127.0.0.1,localhost,169.254.1.3,$(_box_gateway)")
+    return 0
+  else
+    url="http://127.0.0.1:$port"
+    echo "==> proxy: $url (published here, port $port)" >&2
+  fi
+  host="127.0.0.1"
+  # Nothing to probe when fenced: the address is the container's, and neither
+  # the host nor anything else outside that network can dial it.
+  if [[ -n ${BOX_FENCE_NET-} ]]; then
+    BOX_RUN_ARGS+=(--env "BOX_SESSION=$BOX_SESSION" \
+      --env "HTTPS_PROXY=$url" --env "HTTP_PROXY=$url" \
+      --env "https_proxy=$url" --env "http_proxy=$url" \
+      --env "NO_PROXY=127.0.0.1,localhost,169.254.1.3,$(_box_gateway)")
+    return 0
+  fi
+  echo "==> proxy: dialing ${host}:${port}" >&2
+  # With a timeout: bash's /dev/tcp has none, so a dial that gets no answer
+  # looks exactly like a hang. python3 is already needed by box-proxy.
+  local probe='import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), 1).close()
+except OSError:
+    sys.exit(1)'
+  for ((i = 0; i < 60; i++)); do
+    python3 -c "$probe" "$host" "$port" 2>/dev/null && break
+    sleep 0.2
+  done
+  python3 -c "$probe" "$host" "$port" 2>/dev/null || {
+    echo "error: --proxy: nothing answered on ${host}:${port} after 12s" >&2
+    exit 1
+  }
+
+  # The session went to the addon through the config render, not the env: the
+  # container's environment would be one more place it could be read from.
+  BOX_RUN_ARGS+=(--env "BOX_SESSION=$BOX_SESSION"
+    --env "HTTPS_PROXY=$url"
+    --env "HTTP_PROXY=$url"
+    --env "https_proxy=$url"
+    --env "http_proxy=$url"
+    --env "NO_PROXY=127.0.0.1,localhost,169.254.1.3,$(_box_gateway)")
+  echo "==> proxy: $url, $cfg (allow: ${allow_desc:-none}, session $BOX_SESSION)" >&2
+}
+
+# What to say when there is no config: the file, and a small one that would
+# work. A blank error leaves you reading the source to find the schema.
+_box_proxy_no_config() {
+  cat >&2 <<EOF
+error: --proxy: no config at $1
+
+  An example. Put it there, or pass another file with --proxy=PATH:
+
+  {
+    "allow": ["api.github.com", "*.googleapis.com"],
+    "rules": [
+      {"host": "api.github.com", "header": "authorization",
+       "with": "Bearer {cmd:box-gh-token get}", "fake_env": ["GH_TOKEN"]},
+      {"host": "bigquery.googleapis.com", "header": "authorization",
+       "with": "Bearer {cmd:gcloud auth print-access-token}", "ttl": 600,
+       "fake_env": ["BQ_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"]}
+    ],
+    "journal": {"path": "~/.local/state/agent-box/calls.jsonl",
+                "calls": ["llm.example.com"]}
+  }
+
+  allow:  a list of hosts, "all" (the box's normal network) or "none".
+  with:   {env:NAME} reads a host variable; {cmd:...} refreshes on the host.
+  fake_env: client variable names to replace with placeholders; [] for none.
+  replace: swap this text in the header instead of setting it whole.
+  journal: one JSON line per tool call, for reading a session afterwards.
+
+  Or start the box without one: --no-proxy.
+
+  tools/README.md explains the rest.
+EOF
+  exit 1
+}
+
+# No address means the container never came up (its log says why), not that the
+# network is slow: dialing an empty host is what made this look like a hang.
+_box_proxy_no_address() {
+  echo "error: --proxy: $1 has no address on network $2" >&2
+  echo "       its log usually says why: ${BOX_CTR[*]} logs $1" >&2
+  exit 1
+}
+
+# The runtime's default network name, and a container's address on one.
+_box_default_net() {
+  [[ ${BOX_CTR[0]} == podman ]] && echo podman || echo default
+}
+
+_box_container_ip() {
+  local name="$1" net="$2" i ip=
+  for ((i = 0; i < 50; i++)); do
+    if [[ ${BOX_CTR[0]} == podman ]]; then
+      ip="$(podman inspect --format "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" \
+        "$name" 2>/dev/null)"
+    else
+      ip="$("${BOX_CTR[@]}" inspect "$name" 2>/dev/null | python3 -c '
+import json, sys
+net = sys.argv[1]
+try:
+    d = json.load(sys.stdin)[0]
+except Exception:
+    sys.exit()
+nets = d.get("status", {}).get("networks") or []
+for n in nets:
+    if n.get("network") == net and n.get("ipv4Address"):
+        print(n["ipv4Address"].split("/")[0]); break
+' "$net")"
+    fi
+    [[ -n $ip ]] && { echo "$ip"; return 0; }
+    sleep 0.1
+  done
+  return 1
+}
+
+# ------------------------------------------------------------------ fence -----
+# --fence cuts the box off at the network, the way the egress branch does: it
+# goes on its own --internal podman network, which has no route out, and the
+# only thing on it is the host, at the network's gateway. The proxy listens
+# there, so everything the box fetches goes through it or nowhere. That is what
+# makes `"allow": "none"` mean offline rather than "the polite tools stay in".
+#
+# Linux podman under crun only, and nothing that would open another way out.
+# Under krun the box's networking is not a podman bridge, so the fence has
+# nothing to cut: set *_BOX_RUNTIME=crun for a fenced launch.
+_box_fence_start() {
+  # Fence by default whenever the proxy is on; only an explicit opt-out skips it.
+  case "$(box_knob FENCE)" in
+  "") _box_proxy_enabled || return 0 ;;
+  1) ;;
+  *) return 0 ;;
+  esac
+  # A fence is a fence around the proxy, so it brings one: --proxy=PATH picks
+  # the config, and on its own --fence means ~/.box.<profile>.proxy.json. A
+  # box fenced without a proxy would have no network at all.
+  case "$(box_knob PROXY)" in
+  "") printf -v "${BOX_ENV_PREFIX}_PROXY" '%s' 1 ;;
+  0 | no)
+    echo "error: --fence needs a proxy; drop --no-proxy (or the PROXY=0/no knob)" >&2
+    exit 1
+    ;;
+  esac
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    ! _box_is_wsl || {
+      echo "error: --fence is not wired up for WSL2; --no-fence opts out of enforcement" >&2
+      exit 1
+    }
+    _box_is_krun && {
+      echo "error: --fence needs a plain container: krun's VM has its own network," >&2
+      echo "       which a podman network cannot fence; set ${BOX_ENV_PREFIX}_RUNTIME=crun" >&2
+      echo "       or use --no-fence to keep the VM without enforced egress." >&2
+      exit 1
+    }
+  elif [[ ${BOX_CTR[0]} != container ]]; then
+    echo "error: --fence needs podman or Apple's container" >&2
+    exit 1
+  fi
+  local knob
+  [[ -z ${BOX_HOST_PORTS[*]-} ]] || {
+    echo "error: --fence leaves no way out; drop --host-port" >&2
+    exit 1
+  }
+  for knob in SSH DOCKER EGRESS; do
+    [[ -z "$(box_knob "$knob")" || "$(box_knob "$knob")" == 0 ]] || {
+      echo "error: --fence leaves no way out; drop --$(tr 'A-Z_' 'a-z-' <<<"$knob")" >&2
+      exit 1
+    }
+  done
+  BOX_FENCE_NET="$BOX_NAME_PREFIX-net-$$"
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    podman network create --internal "$BOX_FENCE_NET" >/dev/null
+    _box_at_exit "podman network rm -f '$BOX_FENCE_NET' >/dev/null 2>&1"
+  else
+    # Apple's container has the same primitive (macOS 26): host-only, no route.
+    "${BOX_CTR[@]}" network create --internal "$BOX_FENCE_NET" >/dev/null || {
+      echo "error: --fence: could not create network $BOX_FENCE_NET" >&2
+      exit 1
+    }
+    _box_at_exit "${BOX_CTR[*]} network delete '$BOX_FENCE_NET' >/dev/null 2>&1"
+  fi
+  BOX_RUN_ARGS+=(--network "$BOX_FENCE_NET")
+  echo "==> fence: $BOX_FENCE_NET (internal); only the proxy is on it too" >&2
+}
+
 # ------------------------------------------------------------- run flags -----
 _box_git_env() {
   # The box never sees the host's ~/.gitconfig; pass the git identity (if the
@@ -1182,16 +1621,15 @@ _box_git_env() {
 _box_gh_token() { "$BOX_LIB_DIR/box-gh-token" get; }
 
 _box_gh_env() {
-  # --gh: hand the box the repo's GitHub token. box-gh-token keys it by the main
-  # worktree, so every worktree of the repo shares it. Exported rather than passed by value:
-  # `--env NAME` inherits it, keeping the token out of the host's process list.
-  # --gh=host: hand it the host's own `gh auth token` instead, for this run only.
+  # Select a host token; the final env pass masks it if fake_env declares it.
+  # box-gh-token keys by the main worktree; --gh=host uses `gh auth token`.
+  # Unmasked tokens are passed by name to keep them out of the process list.
   BOX_GH_ENV=()
   if [[ "$(box_knob GH)" == host ]]; then
     if GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n $GH_TOKEN ]]; then
       export GH_TOKEN
       BOX_GH_ENV=(--env GH_TOKEN)
-      echo "==> gh: passing the host's own token (every repo it can reach)" >&2
+      echo "==> gh: selected the host's token (every repo it can reach)" >&2
       return 0
     fi
     echo "error: --gh=host: no gh token on the host (run \`gh auth login\`)" >&2
@@ -1201,7 +1639,7 @@ _box_gh_env() {
   if GH_TOKEN=$(_box_gh_token) && [[ -n $GH_TOKEN ]]; then
     export GH_TOKEN
     BOX_GH_ENV=(--env GH_TOKEN)
-    echo "==> gh: the repo's token" >&2
+    echo "==> gh: selected the repo's token" >&2
   else
     echo "error: --gh: no token passed" >&2
     exit 1
@@ -1210,8 +1648,8 @@ _box_gh_env() {
 
 # _box_profile: read ~/.box.default.env if it exists, then the profile the
 # script's flag set in *_BOX_PROFILE (which must exist) on top of it. Each is
-# shell lines, e.g. `export SOME_VAR=SOME_VAL`; every variable goes into the box
-# by name only, so the value stays out of the host's process list. They live
+# shell lines, e.g. `export SOME_VAR=SOME_VAL`; variables go into the box by
+# name, except proxied credentials, which get placeholders. Profiles live
 # outside BOX_HOME, which the box mounts read-write as /root: there the agent
 # could read every profile and plant lines this host then evals.
 #
@@ -1429,6 +1867,8 @@ box_run_args() {
     ${BOX_PROFILE_ENV[@]+"${BOX_PROFILE_ENV[@]}"}
   )
   _box_git_dir_volume
+  _box_fence_start
+  _box_proxy_start
   _box_runtime_args
   _box_host_port_args
   _box_data_volumes
@@ -1470,15 +1910,23 @@ box_run_args() {
 #
 # BOX_ENTRY=1 (set by box_run_args for --ssh under krun) needs box-entry.
 box_run() {
+  local args=() info var
+  while [[ $# -gt 0 && $1 != "$BOX_IMAGE" ]]; do
+    case $1 in
+    --env | -e) args+=("$1" "$(box_env "$2")"); shift 2 ;;
+    --env=*) args+=("--env=$(box_env "${1#--env=}")"); shift ;;
+    -e?*) args+=("-e$(box_env "${1#-e}")"); shift ;;
+    *) args+=("$1"); shift ;;
+    esac
+  done
+  # Declarations also supply variables no profile or wrapper forwarded.
+  for var in ${BOX_FAKE_ENV[@]+"${BOX_FAKE_ENV[@]}"}; do
+    args+=(--env "$(box_env "$var")")
+  done
   [[ ${BOX_SHELL:-0} -eq 1 || ${BOX_ENTRY:-0} -eq 1 ]] || {
-    "${BOX_CTR[@]}" run "$@"
+    "${BOX_CTR[@]}" run ${args[@]+"${args[@]}"} "$@"
     return
   }
-  local args=() info
-  while [[ $# -gt 0 && $1 != "$BOX_IMAGE" ]]; do
-    args+=("$1")
-    shift
-  done
   info="$(_box_entry_version)"
   if [[ ${info:-0} -lt 2 && ${BOX_ENTRY:-0} -eq 1 ]]; then
     echo "error: $BOX_IMAGE predates box-entry, which --ssh under krun needs; rerun with --build-only" >&2

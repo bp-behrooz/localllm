@@ -32,22 +32,26 @@ code back). Logins survive `--clean`.
 **Linux (Arch):**
 
 ```sh
-sudo pacman -S podman krun socat
+sudo pacman -S podman crun krun socat
 grep -q "^$USER:" /etc/subuid ||
   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
 podman system migrate                         # only if podman ran before that
 systemctl --user enable --now podman.socket   # only for --docker
 ```
 
-You also need read/write on `/dev/kvm` (the `kvm` group). podman must be
-rootless, so what the agent writes stays owned by you; the boxes refuse to
-start otherwise. `*_BOX_RUNTIME=crun` runs a plain container instead of the VM.
+podman must be rootless, so what the agent writes stays owned by you; the
+boxes refuse to start otherwise. Proxying and network fencing are on by
+default. Fencing needs `*_BOX_RUNTIME=crun` on Linux, e.g.
+`OC_BOX_RUNTIME=crun opencode-box`; this is a plain container, not a VM.
+Keeping krun requires an explicit `--no-fence` and read/write on `/dev/kvm`
+(the `kvm` group). The runtime is never silently switched.
 
 Files created in the box by a non-root uid land in your subuid range on the
 host. The agents run as root, so that's rare.
 
 **Windows:** WSL2, set up as in [docs/WSL2.md](../docs/WSL2.md), ideally a
 distro just for the boxes. They default to `crun` there, without krun's VM.
+Fencing is not implemented for WSL2; `--no-fence` is required explicitly.
 
 ## The local server
 
@@ -209,6 +213,19 @@ still loaded, every launch offers to take it down (sudo) and won't start
 without an answer. Taking it down restarts the container system, which stops
 every running box.
 
+## Secrets stay on the host
+
+The proxy and network fence are on by default: the box reaches allowed hosts
+through the proxy, which injects credentials only over HTTPS. Each rule's
+`fake_env` declares which client env variables receive placeholders.
+
+Create `~/.box.default.proxy.json` (or `~/.box.<profile>.proxy.json`). See the
+[proxy guide](proxy.md) for a complete example covering localllm, OpenCode Go,
+BigQuery, and GitHub, plus credential setup and rule options.
+
+`--no-fence` keeps the proxy but permits direct network access. `--no-proxy`
+disables both defaults and opts back into real-token forwarding.
+
 ## Customizing a box
 
 Cheapest first:
@@ -241,6 +258,8 @@ does not (it writes to `/usr`).
 | `*_BOX_CPUS`, `*_BOX_MEMORY` | VM size (default 4 / 4G; krun wants `M` or `G`) |
 | `*_BOX_SSH`, `*_BOX_DOCKER`, `*_BOX_SEARCH`, `*_BOX_PROFILE` | same as the flags |
 | `*_BOX_HOST_PORT` | same as `--host-port` |
+| `*_BOX_PROXY` | same as `--proxy` (a config path, or `1` for `~/.box.<profile>.proxy.json`); `0` is `--no-proxy` |
+| `*_BOX_FENCE` | follows the proxy by default; `1` forces fencing, `0` is `--no-fence` |
 | `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`, `crun` on WSL2; `crun` for no VM) |
 | `*_BOX_PROJECT` | name the project for persisted service data (default: git worktree or `$PWD`) |
 | `*_BOX_DOCKER_SOCK` | Docker socket (default: colima etc. on a Mac, your podman socket on Linux) |
@@ -321,8 +340,9 @@ To change the shared base for everyone, edit `box_dockerfile_base` in
 ## Flags
 
 Shared: `--rebuild`, `--build-only`, `--ssh`, `--gh[=host]`, `--docker`,
-`--host-port <port>`, `--search`, `--profile NAME`, `--clean`, `--clean-all`,
-`--clean-data`, `--shell`. pi-box, opencode-box and ocr-box add `--sync` /
+`--host-port <port>`, `--proxy[=PATH]`, `--no-proxy`, `--fence`, `--no-fence`,
+`--search`, `--profile NAME`, `--clean`,
+`--clean-all`, `--clean-data`, `--shell`. pi-box, opencode-box and ocr-box add `--sync` /
 `--sync-only` to refresh the model list from the server. Everything else goes
 to the agent.
 

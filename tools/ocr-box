@@ -50,7 +50,7 @@
 #   LOCAL_LLM_URL        OpenAI-compatible base URL of your LLM server,
 #                        e.g. https://llm.example.com/v1 — needed to --sync, or on
 #                        first launch before config.json exists
-#   LOCAL_LLM_API_KEY    its API key; written into the box's config on --sync
+#   LOCAL_LLM_API_KEY    host API key; fake_env can mask it in the client config
 #   OCR_BOX_MODEL        which served model reviews (default: the first one the
 #                        server reports)
 #   (timeout)            set `timeout_sec` in the config's localllm entry (replaces
@@ -157,7 +157,8 @@ prov = cfg.setdefault("custom_providers", {}).setdefault("localllm", {})
 # Always refresh the endpoint and the served model list. protocol is a fixed
 # property of the (OpenAI-compatible) server, so default it but don't clobber a
 # hand-set value on re-sync.
-prov["api_key"]  = key
+# Client auth is filled after the proxy policy is loaded, not during host sync.
+prov.pop("api_key", None)
 prov["url"]      = base
 prov.setdefault("protocol", "openai")
 prov["models"]   = models
@@ -188,11 +189,32 @@ print("==> synced %d model(s) for localllm: %s" % (len(models), ", ".join(models
 PYEOF
 }
 
+ensure_credentials() {
+  # Older homes carry a literal key; scrub it before mounting the home again.
+  OCR_CONFIG="$OCR_CONFIG" OCR_KEY_REF="$(box_env LOCAL_LLM_API_KEY)" python3 - <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+path = Path(os.environ["OCR_CONFIG"])
+cfg = json.loads(path.read_text())
+prov = (cfg.get("custom_providers") or {}).get("localllm")
+ref = os.environ["OCR_KEY_REF"]
+key = ref.partition("=")[2] if "=" in ref else os.environ.get("LOCAL_LLM_API_KEY")
+if prov is not None and prov.get("api_key") == "box-proxy-placeholder" and not key:
+    sys.exit("error: LOCAL_LLM_API_KEY is unset and no active fake_env declaration masks it")
+if prov is not None and key and prov.get("api_key") != key:
+    prov["api_key"] = key
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
+PYEOF
+}
+
 # ---------------------------------------------------------------- main ------
 box_clean_or_exit
 
 if [[ $SYNC_ONLY -eq 1 ]]; then
   sync_config
+  # Host-only sync has no container policy; only direct mode writes a key here.
+  _box_proxy_enabled || ensure_credentials
   exit 0
 fi
 
@@ -213,6 +235,7 @@ box_docker_bridge
 # not exec: the socat trap must outlive ocr. OCR_NO_UPDATE: the version lives
 # in the image, so don't ask npm for a newer one.
 box_run_args
+ensure_credentials
 box_run "${BOX_RUN_ARGS[@]}" \
   --env OCR_NO_UPDATE=1 \
   "$BOX_IMAGE" "$@"

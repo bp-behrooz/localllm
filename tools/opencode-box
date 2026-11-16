@@ -48,12 +48,12 @@
 #   OC_BOX_HOME         host dir for the box's own config/state (default ~/.opencode-box)
 #   LOCAL_LLM_URL       OpenAI-compatible base URL of your LLM server,
 #                       e.g. https://llm.example.com/v1
-#   LOCAL_LLM_API_KEY   its API key; passed into the container, never written to disk
+#   LOCAL_LLM_API_KEY   host API key; proxy rules can declare a fake client env
 #   OC_BOX_DEFAULT      model a sync makes the current one, e.g. "localllm/<preset>"
 #                       or "opencode-go/minimax-m2.7" (default localllm/<first synced
 #                       model>, i.e. the server's preloaded one); switching models in
 #                       opencode sticks until the next sync
-#   OPENCODE_API_KEY    passed through for OpenCode Go (built in)
+#   OPENCODE_API_KEY    OpenCode Go key; use the proxy rule's fake_env to mask it
 #   OC_BOX_SEARCH       1 to enable web search (same as --search)
 #   TAVILY_API_KEY      passed through when search is enabled; OpenCode 2.0
 #                       reads it as the provider for its built-in websearch tool
@@ -170,7 +170,7 @@ prov.setdefault("npm", "@ai-sdk/openai-compatible")
 prov.setdefault("name", "Local LLM")
 opts = prov.setdefault("options", {})
 opts["baseURL"] = base
-opts.setdefault("apiKey", "{env:LOCAL_LLM_API_KEY}")   # resolved by opencode at runtime
+opts["apiKey"] = "{env:LOCAL_LLM_API_KEY}"   # resolved by opencode at runtime
 prov["models"] = models
 
 # No "model" pin on purpose: it outranks the recent models, so it would undo
@@ -208,6 +208,11 @@ from pathlib import Path
 cpath = Path(os.environ["OC_CONFIG"])
 cfg = json.loads(cpath.read_text()) if cpath.is_file() else {"$schema": "https://opencode.ai/config.json"}
 before = json.dumps(cfg, sort_keys=True)
+
+# Migrate managed credentials even when an existing home is launched without sync.
+opts = ((cfg.get("provider") or {}).get("localllm") or {}).get("options")
+if opts is not None:
+    opts["apiKey"] = "{env:LOCAL_LLM_API_KEY}"
 
 cfg["permission"] = "allow"
 hide = [p.strip() for p in os.environ["OC_BOX_HIDE"].split(",") if p.strip()]
@@ -252,7 +257,6 @@ fi
 
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "@opencode/cli@$OC_VERSION"
-
 if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi

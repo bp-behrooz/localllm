@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""box-proxy: the host side of a box's credentials.
+
+One container per launch, in front of the box's outbound traffic.
+The box is pointed at it with HTTPS_PROXY and trusts its CA; a host not in the
+config's allow-list never gets a connection, and a rule can put a real
+credential in a header on the way out, so the box only ever holds a placeholder
+(or nothing at all). It also journals the tool calls the model asks for, for
+looking at a session afterwards.
+
+    box-proxy run --config ~/.box.NAME.proxy.json [--bind 127.0.0.1:PORT]
+
+The CA lives in ~/.config/agent-box/mitm (or --confdir). `box-proxy ca` prints
+the certificate to bake into the box image; the key never leaves the host.
+
+    {
+      "session": "auto",
+      "allow": ["api.github.com", "*.googleapis.com"],
+      "rules": [
+        {"host": "api.github.com", "header": "authorization",
+         "with": "Bearer {gh}", "fake_env": ["GH_TOKEN"]},
+        {"host": "oauth2.googleapis.com", "path": "/token",
+         "respond": {"access_token": "dummy", "token_type": "Bearer",
+                     "expires_in": 3600}}
+      ],
+      "journal": {"path": "~/.local/state/agent-box/calls.jsonl",
+                  "calls": ["llm.example.com"]}
+    }
+
+`{name}` is read from the host keychain (box-secret); `{env:NAME}` reads an
+exported host variable; `{cmd:...}` runs a command and refreshes its output every
+`ttl` seconds (default 600). Each credential rule declares `fake_env`: the
+client env names to replace with placeholders (or [] for none). See
+box-proxy-addon.py for the whole rule set.
+"""
+
+import argparse
+import base64
+import json
+import math
+import os
+import re
+import shutil
+import shlex
+import socket
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BOX_SECRET = os.path.join(HERE, "box-secret")
+CONFDIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                       os.path.expanduser("~/.config"), "agent-box", "mitm")
+
+
+def session_id():
+    import secrets
+    return time_stamp() + "-" + secrets.token_hex(2)
+
+
+def time_stamp():
+    import datetime
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M")
+
+
+def free_port(host):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+
+
+def mitmdump():
+    for cand in (os.environ.get("BOX_PROXY_MITMDUMP"), shutil.which("mitmdump"),
+                 os.path.expanduser("~/.local/bin/mitmdump")):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    sys.exit("box-proxy: mitmdump not found (uv tool install mitmproxy, or set "
+             "BOX_PROXY_MITMDUMP)")
+
+
+def load_config(path):
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if "allow" not in cfg:
+        sys.exit('box-proxy: the config needs "allow": a list of hosts, "all" '
+                 'for the box\'s normal network, or "none" to keep it offline')
+    allow = cfg["allow"]
+    if isinstance(allow, str):
+        if allow not in ("all", "*", "none"):
+            sys.exit(f'box-proxy: "allow": {allow!r} is not "all", "none" or a list')
+    elif not isinstance(allow, list):
+        sys.exit('box-proxy: "allow" must be a list of hosts, "all" or "none"')
+    if isinstance(allow, list) and any(not isinstance(p, str) or not p for p in allow):
+        sys.exit('box-proxy: "allow" entries must be non-empty host strings')
+    for r in cfg.get("rules") or []:
+        if "respond" not in r and not r.get("with"):
+            sys.exit(f"box-proxy: rule {r} has neither \"with\" nor \"respond\"")
+        if not isinstance(r.get("host"), str) or not r["host"]:
+            sys.exit('box-proxy: every rule needs a non-empty "host" (use "*" explicitly for all hosts)')
+        if "with" in r and "{" not in r["with"]:
+            sys.exit(f"box-proxy: rule {r}: \"with\" holds no {{name}} or {{cmd:...}}")
+        if "with" in r and "fake_env" not in r:
+            sys.exit('box-proxy: credential rules need "fake_env": ["CLIENT_TOKEN"] '
+                     '(or [] if no fake env is needed)')
+        fake_env = r.get("fake_env", [])
+        if not isinstance(fake_env, list) or any(
+            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            for name in fake_env
+        ):
+            sys.exit('box-proxy: "fake_env" must be a list of environment variable names')
+        try:
+            ttl = float(r.get("ttl", 600))
+            if not math.isfinite(ttl) or ttl <= 0 or isinstance(r.get("ttl"), bool):
+                raise ValueError
+            r["ttl"] = ttl
+        except (ValueError, TypeError, OverflowError):
+            sys.exit('box-proxy: rule "ttl" must be a positive number')
+    return cfg
+
+
+CA_CONFIG = """[req]
+distinguished_name = dn
+x509_extensions = v3_ca
+prompt = no
+
+[dn]
+CN = box-proxy CA
+
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+"""
+
+
+def cmd_ca(args):
+    """Make the CA the images trust, with openssl alone.
+
+    mitmproxy would make one on its first start, but that would mean running it
+    on the host just to generate a file, and the host does not need mitmproxy:
+    only the container does. This writes what mitmproxy expects to find in its
+    confdir -- mitmproxy-ca.pem, the key and certificate together -- and the
+    certificate on its own, which is what an image carries.
+    """
+    confdir = args.confdir
+    os.makedirs(confdir, mode=0o700, exist_ok=True)
+    os.chmod(confdir, 0o700)
+    cert = os.path.join(confdir, "mitmproxy-ca-cert.pem")
+    key = os.path.join(confdir, "mitmproxy-ca-key.pem")
+    bundle = os.path.join(confdir, "mitmproxy-ca.pem")
+    for path in (key, bundle):
+        if os.path.exists(path):
+            os.chmod(path, 0o600)
+    if not (os.path.exists(cert) and os.path.exists(key)):
+        fd = os.open(key, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        tmp = tempfile.mkdtemp(prefix="box-ca.")
+        try:
+            cnf = os.path.join(tmp, "openssl.cnf")
+            with open(cnf, "w", encoding="utf-8") as f:
+                f.write(CA_CONFIG)
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", key, "-out", cert, "-days", "3650",
+                 "-config", cnf],
+                check=True, capture_output=True,
+                stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError) as e:
+            sys.exit(f"box-proxy: could not make a CA with openssl ({e})")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        os.chmod(key, 0o600)
+    # mitmproxy reads one file with both halves; the key stays out of any image.
+    if not os.path.exists(bundle) or os.path.getmtime(bundle) < os.path.getmtime(cert):
+        fd = os.open(bundle, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            for part in (key, cert):
+                with open(part, "rb") as f:
+                    out.write(f.read())
+        os.chmod(bundle, 0o600)
+    print(cert)
+
+
+def render_template(template, out_dir, refreshers, ttl):
+    """Keep secret text out of templates; commands get a host-side refresher."""
+    out, i, n = [], 0, len(refreshers)
+    while True:
+        start = template.find("{", i)
+        if start < 0:
+            out.append(template[i:])
+            return "".join(out)
+        end = template.find("}", start)
+        if end < 0:
+            out.append(template[i:])
+            return "".join(out)
+        out.append(template[i:start])
+        expr = template[start + 1:end].strip()
+        if expr.startswith("cmd:"):
+            local = os.path.join(out_dir, f"secret-{n}")
+            out.append("{file:/etc/box-proxy/" + os.path.basename(local) + "}")
+            refreshers.append((expr[4:], local, max(int(ttl), 30)))
+            n += 1
+        elif expr.startswith("file:"):
+            out.append("{" + expr + "}")
+        else:
+            if expr.startswith("env:"):
+                value = os.environ.get(expr[4:], "")
+                if not value.rstrip("\n"):
+                    sys.exit(f"box-proxy: host variable {expr[4:]} is empty or unset")
+            else:
+                try:
+                    value = subprocess.run([BOX_SECRET, "get", expr], check=True,
+                                           capture_output=True, text=True).stdout
+                except (OSError, subprocess.CalledProcessError) as e:
+                    sys.exit(f"box-proxy: no secret {expr} ({e})")
+            fd, local = tempfile.mkstemp(prefix="secret-", dir=out_dir)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(value.rstrip("\n"))
+            out.append("{file:/etc/box-proxy/" + os.path.basename(local) + "}")
+        i = end + 1
+
+
+def write_refresher(path, refreshers):
+    """One loop per command, each writing its file atomically so the addon
+    never reads half a token. The script kills its children when it is told to
+    stop, so a launch that ends leaves no sleep and no shell behind."""
+    lines = [
+        "#!/bin/sh",
+        "# written by box-proxy render; stopped with the launch",
+        "umask 077",
+        "# Close the descriptors it inherited: a long-lived loop has no business",
+        "# holding anyone's pipe open.",
+        "for fd in 3 4 5 6 7 8 9; do eval \"exec $fd>&-\"; done 2>/dev/null",
+        "pids=''",
+    ]
+    for cmd, target, ttl in refreshers:
+        enc = base64.b64encode(cmd.encode()).decode()
+        temp, target = shlex.quote(target + ".tmp"), shlex.quote(target)
+        lines += [
+            "(",
+            "  while :; do",
+            f"    rm -f {temp} && printf '%s' '{enc}' | base64 -d | /bin/sh >{temp} 2>/dev/null"
+            f" && mv {temp} {target} && chmod 600 {target}"
+            " || echo 'box-proxy: credential refresh failed; retaining previous value' >&2",
+            f"    sleep {ttl}",
+            "  done",
+            ") &",
+            'pids="$pids $!"',
+        ]
+    lines += [
+        "trap 'kill $pids 2>/dev/null; exit 0' TERM INT",
+        "wait",
+        "",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    os.chmod(path, 0o700)
+
+
+def cmd_render(args):
+    """Make the config the container runs: secrets resolved, commands turned
+    into files, journal pointed at the mounted directory."""
+    cfg = load_config(args.config)
+    if args.session:
+        cfg["session"] = args.session
+    elif not cfg.get("session") or cfg["session"] == "auto":
+        cfg["session"] = session_id()
+    os.makedirs(args.dir, mode=0o700, exist_ok=True)
+    os.chmod(args.dir, 0o700)
+    refreshers = []
+    for r in cfg.get("rules") or []:
+        if "with" in r:
+            r["with"] = render_template(r["with"], args.dir, refreshers, r.get("ttl", 600))
+    journal = cfg.get("journal") or {}
+    if journal.get("path"):
+        journal["path"] = "/var/journal/" + os.path.basename(journal["path"])
+    args.out = args.out or os.path.join(args.dir, "proxy.json")
+    fd = os.open(args.out, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.truncate()
+        json.dump(cfg, f, indent=2)
+    script = ""
+    if refreshers:
+        script = os.path.join(args.dir, "refresh.sh")
+        write_refresher(script, refreshers)
+    for cmd, target, _ in refreshers:
+        temp = target + ".tmp"
+        if os.path.exists(temp):
+            os.unlink(temp)
+        p = subprocess.run(
+            f"umask 077; ({cmd}) >{shlex.quote(temp)} && mv {shlex.quote(temp)} {shlex.quote(target)}",
+            shell=True, capture_output=True, stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            sys.exit(f"box-proxy: credential command failed (exit {p.returncode}); check rule commands")
+        os.chmod(target, 0o600)
+    print(script)
+
+
+def cmd_run(args):
+    cfg = load_config(args.config)
+    if args.session:
+        cfg["session"] = args.session
+    if not cfg.get("session") or cfg["session"] == "auto":
+        cfg["session"] = session_id()
+    host, _, port = args.bind.rpartition(":")
+    host = host or "127.0.0.1"
+    port = int(port or 0) or free_port(host)
+    os.makedirs(args.confdir, mode=0o700, exist_ok=True)
+    os.chmod(args.confdir, 0o700)
+    # The addon unlinks this private copy as soon as it has read it.
+    mitm = mitmdump()
+    fd, run_cfg = tempfile.mkstemp(prefix="run-", suffix=".json", dir=args.confdir)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    env = dict(os.environ, BOX_PROXY_CONFIG=run_cfg, BOX_PROXY_CONFIG_TEMP=run_cfg)
+    argv = [mitm, "-q",
+            "--mode", f"regular@{host}:{port}",
+            "--set", f"confdir={args.confdir}",
+            "--set", "block_global=false",
+            "-s", os.path.join(HERE, "box-proxy-addon.py")]
+    if args.insecure:
+        # Tests only: the upstream in them holds a self-signed certificate.
+        argv[2:2] = ["--set", "ssl_insecure=true"]
+    if args.print_bind:
+        print(f"{host}:{port}", flush=True)
+    sys.stderr.write(f"box-proxy: listening on {host}:{port} for {cfg.get('session')}\n")
+    sys.stderr.flush()
+    try:
+        os.execvpe(argv[0], argv, env)
+    except OSError:
+        os.unlink(run_cfg)
+        raise
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="box-proxy")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    run = sub.add_parser("run", help="start the proxy in front of this launch")
+    run.add_argument("--config", required=True)
+    run.add_argument("--bind", default="127.0.0.1:0")
+    run.add_argument("--confdir", default=os.environ.get("BOX_PROXY_CONFDIR", CONFDIR))
+    run.add_argument("--session", default=None,
+                     help="the launch id stamped on every journal line")
+    run.add_argument("--print-bind", action="store_true")
+    run.add_argument("--insecure", action="store_true",
+                     help="don't verify upstream certificates (tests only)")
+    run.set_defaults(func=cmd_run)
+
+    render = sub.add_parser("render", help="resolve a config for the container")
+    render.add_argument("--config", required=True)
+    render.add_argument("--dir", required=True)
+    render.add_argument("--out", default=None)
+    render.add_argument("--session", default=None)
+    render.set_defaults(func=cmd_render)
+
+    ca = sub.add_parser("ca", help="print the CA certificate to trust in the box")
+    ca.add_argument("--confdir", default=os.environ.get("BOX_PROXY_CONFDIR", CONFDIR))
+    ca.set_defaults(func=cmd_ca)
+
+    args = ap.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
