@@ -1602,6 +1602,74 @@ PY
   [[ $status -ne 0 && $output == *"WSL2"* && $output == *"--no-fence"* ]]
 }
 
+# -------------------------------------------------------------------- gpu -----
+@test "gpu: --gpu runs crun with kfd and all of /dev/dri" {
+  export CL_BOX_RUNTIME=crun
+  run_box --gpu --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --runtime crun
+  run_has --device /dev/kfd
+  run_has --device /dev/dri
+  run_has --group-add keep-groups
+}
+
+@test "gpu: --gpu=NODES passes only those render nodes" {
+  export CL_BOX_RUNTIME=crun BOX_DRI_DIR="$BATS_TEST_TMPDIR/dri"
+  mkdir -p "$BOX_DRI_DIR" && touch "$BOX_DRI_DIR/renderD128" "$BOX_DRI_DIR/renderD129"
+  run_box --gpu=renderD129 --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --device /dev/dri/renderD129
+  run_lacks /dev/dri
+  run_box --gpu=renderD130 --shell -c true
+  [[ $status -ne 0 && $output == *"isn't a render node"* ]]
+}
+
+@test "gpu: refused under krun, on WSL2 and on a Mac" {
+  load_lib
+  CL_BOX_GPU=all CL_BOX_RUNTIME=krun BOX_RUN_ARGS=()
+  run _box_gpu_args
+  [[ $status -ne 0 && $output == *"no /dev/kfd"* ]]
+  as_wsl
+  run_box --gpu --shell -c true
+  [[ $status -ne 0 && $output == *"--gpu needs Linux"* ]]
+  as_mac
+  run_box --gpu --shell -c true
+  [[ $status -ne 0 && $output == *"--gpu needs Linux"* ]]
+}
+
+@test "gpu: --gpu and --proxy together, and only the box gets the devices" {
+  export CL_BOX_RUNTIME=crun BOX_DRI_DIR="$BATS_TEST_TMPDIR/dri"
+  proxy_stub
+  mkdir -p "$BOX_DRI_DIR" && touch "$BOX_DRI_DIR/renderD128"
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --gpu --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  run_has --device /dev/kfd
+  ! grep -qx -- /dev/kfd "$FAKE_DIR/proxy.args"
+}
+
+# ------------------------------------------------------------------- size -----
+@test "size: max leaves the limit off, and the box goes first on OOM" {
+  export CL_BOX_RUNTIME=crun
+  CL_BOX_CPUS=max CL_BOX_MEMORY=max run_box --shell -c true
+  [[ $status -eq 0 ]]
+  run_lacks --cpus
+  run_lacks --memory
+  run_has --oom-score-adj 1000
+  CL_BOX_MEMORY=max run_box --shell -c true
+  run_has --cpus 4
+  CL_BOX_CPUS=max run_box --shell -c true
+  run_has --memory 4G
+  run_lacks --oom-score-adj
+}
+
+@test "size: max is refused for a VM" {
+  load_lib
+  CL_BOX_MEMORY=max BOX_RUN_ARGS=()
+  run _box_size_args
+  [[ $status -ne 0 && $output == *"a VM needs a size"* ]]
+}
+
 @test "proxy: an image built with another CA is refused" {
   export CL_BOX_RUNTIME=crun
   proxy_stub

@@ -213,6 +213,18 @@ still loaded, every launch offers to take it down (sudo) and won't start
 without an answer. Taking it down restarts the container system, which stops
 every running box.
 
+## GPUs
+
+`--gpu` hands the box `/dev/kfd` and `/dev/dri` (or only the render nodes you
+name, `--gpu=renderD129`), so ROCm sees the GPUs. krun's VM has no `/dev/kfd`, so
+a GPU run is under `crun` (`*_BOX_RUNTIME=crun`): the agent shares your kernel and
+talks to amdgpu directly. Name only a card the pool isn't serving from, or stop
+the pool first.
+
+```sh
+opencode-box --gpu=renderD129 --proxy=~/.box.engine.proxy.json --fence
+```
+
 ## Secrets stay on the host
 
 The proxy and network fence are on by default: the box reaches allowed hosts
@@ -260,6 +272,7 @@ does not (it writes to `/usr`).
 | `*_BOX_HOST_PORT` | same as `--host-port` |
 | `*_BOX_PROXY` | same as `--proxy` (a config path, or `1` for `~/.box.<profile>.proxy.json`); `0` is `--no-proxy` |
 | `*_BOX_FENCE` | follows the proxy by default; `1` forces fencing, `0` is `--no-fence` |
+| `*_BOX_GPU` | same as `--gpu`: `all` or render nodes, e.g. `renderD129,renderD130` |
 | `*_BOX_RUNTIME` | Linux: podman runtime (default `krun`, `crun` on WSL2; `crun` for no VM) |
 | `*_BOX_PROJECT` | name the project for persisted service data (default: git worktree or `$PWD`) |
 | `*_BOX_DOCKER_SOCK` | Docker socket (default: colima etc. on a Mac, your podman socket on Linux) |
@@ -341,6 +354,7 @@ To change the shared base for everyone, edit `box_dockerfile_base` in
 
 Shared: `--rebuild`, `--build-only`, `--ssh`, `--gh[=host]`, `--docker`,
 `--host-port <port>`, `--proxy[=PATH]`, `--no-proxy`, `--fence`, `--no-fence`,
+`--gpu[=NODES]`,
 `--search`, `--profile NAME`, `--clean`,
 `--clean-all`, `--clean-data`, `--shell`. pi-box, opencode-box and ocr-box add `--sync` /
 `--sync-only` to refresh the model list from the server. Everything else goes

@@ -93,7 +93,7 @@ _box_ports() {
 # Parses common flags shared by all boxes:
 #   --rebuild, --build-only, --clean, --clean-all, --clean-data, --ssh, --gh[=host], --docker, --search,
 #   --host-port <port>, --proxy[=PATH], --no-proxy, --fence, --no-fence,
-#   --profile[=NAME], --shell
+#   --gpu[=NODES], --profile[=NAME], --shell
 # plus (--sync, --sync-only) when BOX_CAN_SYNC=1. A --clean flag on its own is
 # the whole command; with --rebuild or --build-only it runs first and the build
 # follows (see box_clean_or_exit). --host-port takes a port or a comma-separated
@@ -188,6 +188,14 @@ box_parse_args() {
       ;;
     --no-fence)
       printf -v "${BOX_ENV_PREFIX}_FENCE" '%s' 0
+      shift
+      ;;
+    --gpu)
+      printf -v "${BOX_ENV_PREFIX}_GPU" '%s' all
+      shift
+      ;;
+    --gpu=*)
+      printf -v "${BOX_ENV_PREFIX}_GPU" '%s' "${1#--gpu=}"
       shift
       ;;
     --profile)
@@ -1603,6 +1611,63 @@ _box_fence_start() {
   echo "==> fence: $BOX_FENCE_NET (internal); only the proxy is on it too" >&2
 }
 
+# ------------------------------------------------------------------- gpu -----
+# --gpu hands the box the host's AMD GPUs for ROCm: /dev/kfd plus every node in
+# /dev/dri. --gpu=renderD129[,renderD130] passes only those render nodes; KFD
+# shows ROCm just the GPUs whose render node the box can open, so that keeps a
+# card the pool is serving from out of reach. Linux podman only, under crun:
+# the agent shares the host kernel and talks to amdgpu.
+_box_gpu_args() {
+  local gpu node
+  gpu="$(box_knob GPU)"
+  [[ -n $gpu ]] || return 0
+  [[ ${BOX_CTR[0]} == podman ]] && ! _box_is_wsl || {
+    echo "error: --gpu needs Linux with podman (not a Mac or WSL2)" >&2
+    exit 1
+  }
+  [[ "$(box_runtime)" != krun ]] || {
+    echo "error: --gpu can't run under krun, whose VM has no /dev/kfd; unset ${BOX_ENV_PREFIX}_RUNTIME" >&2
+    exit 1
+  }
+  BOX_RUN_ARGS+=(--device /dev/kfd --group-add keep-groups)
+  if [[ $gpu == all || $gpu == 1 ]]; then
+    BOX_RUN_ARGS+=(--device /dev/dri)
+    echo "==> gpu: /dev/kfd and all of /dev/dri (crun, no VM)" >&2
+    return 0
+  fi
+  for node in ${gpu//,/ }; do
+    node="${node#/dev/dri/}"
+    [[ $node =~ ^renderD[0-9]+$ && -e "$BOX_DRI_DIR/$node" ]] || {
+      echo "error: --gpu=$gpu: $node isn't a render node in $BOX_DRI_DIR" >&2
+      exit 1
+    }
+    BOX_RUN_ARGS+=(--device "/dev/dri/$node")
+  done
+  echo "==> gpu: /dev/kfd and $gpu (crun, no VM)" >&2
+}
+BOX_DRI_DIR="${BOX_DRI_DIR:-/dev/dri}" # the tests point it at a fake one
+
+# --cpus and --memory from the CPUS and MEMORY knobs (default 4 / 4G). `max`
+# leaves that limit off, which only a plain container can do: a VM (krun, a
+# Mac) needs a size to boot with. With no memory limit the box goes first when
+# the host runs out, rather than whatever else is running there.
+_box_size_args() {
+  local cpus mem
+  cpus="$(box_knob CPUS 4)"
+  mem="$(box_knob MEMORY 4G)"
+  if [[ $cpus == max || $mem == max ]] &&
+    { [[ ${BOX_CTR[0]} != podman ]] || _box_is_krun; }; then
+    echo "error: ${BOX_ENV_PREFIX}_CPUS/MEMORY=max needs a plain container (crun, or --gpu); a VM needs a size" >&2
+    exit 1
+  fi
+  [[ $cpus == max ]] || BOX_RUN_ARGS+=(--cpus "$cpus")
+  if [[ $mem == max ]]; then
+    BOX_RUN_ARGS+=(--oom-score-adj 1000)
+  else
+    BOX_RUN_ARGS+=(--memory "$mem")
+  fi
+}
+
 # ------------------------------------------------------------- run flags -----
 _box_git_env() {
   # The box never sees the host's ~/.gitconfig; pass the git identity (if the
@@ -1844,13 +1909,12 @@ box_run_args() {
     --workdir "$PWD"
     --volume "$BOX_HOME:/root"
     --tmpfs /tmp
-    --cpus "$(box_knob CPUS 4)"
-    --memory "$(box_knob MEMORY 4G)"
     # mise refuses to read a project's mise.toml until it's trusted, and would
     # sit on a prompt no agent can answer. The box only ever sees $PWD.
     --env "MISE_TRUSTED_CONFIG_PATHS=$PWD"
     --env MISE_YES=1
   )
+  _box_size_args
   # A terminal only when there is one: `claude-box --shell -c ...` then also
   # works from a pipe or CI, where -t is refused.
   [[ -t 0 && -t 1 ]] && BOX_RUN_ARGS+=(-t)
@@ -1870,6 +1934,7 @@ box_run_args() {
   _box_fence_start
   _box_proxy_start
   _box_runtime_args
+  _box_gpu_args
   _box_host_port_args
   _box_data_volumes
   if [[ -n "$(box_knob SSH)" ]]; then
