@@ -75,6 +75,7 @@ BOX_ENV_PREFIX="OC_BOX"
 BOX_CAN_SYNC=1
 
 OC_VERSION="${OC_BOX_VERSION:-latest}"
+OC_PONYTAIL="/opt/opencode-plugins/node_modules/@dietrichgebert/ponytail/.opencode/plugins/ponytail.mjs"
 BOX_NPM_PKG="@opencode/cli"
 BOX_NPM_TAG="$OC_VERSION"
 OC_BOX_HOME="${OC_BOX_HOME:-$HOME/.opencode-box}"
@@ -111,6 +112,13 @@ box_dockerfile_agent() {
 RUN npm install -g @opencode/cli@${OC_VERSION} \\
  && npm cache clean --force
 
+# Load the image's plugin directly: no npm resolution/download at launch.
+RUN npm install --prefix /opt/opencode-plugins --omit=dev --legacy-peer-deps \\
+      @dietrichgebert/ponytail \\
+ && test -f "$OC_PONYTAIL" \\
+ && npm cache clean --force
+LABEL opencode-box.plugins=1
+
 # No XDG overrides needed: /root as a whole is the persisted mount, so the
 # defaults (~/.config/opencode, ~/.local/share/opencode) already land in it.
 
@@ -132,6 +140,7 @@ sync_models() {
   mkdir -p "$(dirname "$(config_path)")"
 
   OC_CONFIG="$(config_path)" OC_STATE="$(state_path)" OC_BOX_DEFAULT="${OC_BOX_DEFAULT:-}" PROVIDER="$PROVIDER" \
+    OC_PONYTAIL="$OC_PONYTAIL" \
     python3 - <<'PYEOF'
 import json, os, sys, urllib.request
 from pathlib import Path
@@ -164,7 +173,7 @@ if not models:
 # we leave it out.
 cfg = json.loads(cpath.read_text()) if cpath.is_file() else {
     "$schema": "https://opencode.ai/config.json",
-    "plugin": ["@dietrichgebert/ponytail"]}
+    "plugin": [os.environ["OC_PONYTAIL"]]}
 prov = cfg.setdefault("provider", {}).setdefault(provider, {})
 prov.setdefault("npm", "@ai-sdk/openai-compatible")
 prov.setdefault("name", "Local LLM")
@@ -200,7 +209,7 @@ ensure_settings() {
   # blocklist from OC_BOX_HIDE. Web search needs no config at all — 2.0 reads
   # TAVILY_API_KEY itself, which --search passes in.
   mkdir -p "$(dirname "$(config_path)")"
-  OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" \
+  OC_CONFIG="$(config_path)" OC_BOX_HIDE="${OC_BOX_HIDE-opencode}" OC_PONYTAIL="$OC_PONYTAIL" \
     OC_BOX_SEARCH="$(box_knob SEARCH)" python3 - <<'PYEOF'
 import json, os
 from pathlib import Path
@@ -208,6 +217,11 @@ from pathlib import Path
 cpath = Path(os.environ["OC_CONFIG"])
 cfg = json.loads(cpath.read_text()) if cpath.is_file() else {"$schema": "https://opencode.ai/config.json"}
 before = json.dumps(cfg, sort_keys=True)
+
+# Migrate the old npm reference without re-adding a plugin the user removed.
+if "plugin" in cfg:
+    cfg["plugin"] = [os.environ["OC_PONYTAIL"] if p == "@dietrichgebert/ponytail" else p
+                     for p in cfg["plugin"]]
 
 # Migrate managed credentials even when an existing home is launched without sync.
 opts = ((cfg.get("provider") or {}).get("localllm") or {}).get("options")
@@ -257,6 +271,12 @@ fi
 
 box_require_runtime
 box_ensure_image "$REBUILD" "$BUILD_ONLY" "@opencode/cli@$OC_VERSION"
+# Configs use the plugin in the image; older images do not contain it.
+if [[ $(_box_image_label opencode-box.plugins) -lt 1 ]]; then
+  echo "==> $BOX_IMAGE predates the baked-in OpenCode plugins" >&2
+  box_build_image "@opencode/cli@$OC_VERSION"
+fi
+
 if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi

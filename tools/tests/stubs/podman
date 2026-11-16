@@ -11,6 +11,7 @@ if [[ $1 == run && $* == *"--entrypoint npm"* ]]; then
 fi
 echo "podman $*" >>"$FAKE_DIR/calls"
 case $1 in
+build) cp "${!#}/Dockerfile" "$FAKE_DIR/Dockerfile" ;;
 info) echo "${FAKE_ROOTLESS:-true}" ;;
 network)
   # create/rm are recorded above; no other output needed.
@@ -20,6 +21,8 @@ image)
   if [[ $2 == inspect && $* == *--format* ]]; then
     if [[ $* == *agent-box.ca* ]]; then
       echo "${FAKE_CA_STAMP-}"
+    elif [[ $* == *opencode-box.plugins* ]]; then
+      echo "${FAKE_OC_PLUGINS:-1}"
     else
       echo "${FAKE_ENTRY:-7}"
     fi

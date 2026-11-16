@@ -407,9 +407,12 @@ telemetry, update checks (the version lives in the image) and catalog fetches.
 | `opencode-box` | `OPENCODE_DISABLE_MODELS_FETCH=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_LSP_DOWNLOAD=1` |
 | `ocr-box` | `OCR_NO_UPDATE=1` |
 
-pi's packages live in the image under `/opt/pi-packages` and load as local
-paths. Model catalogs come with the pi and opencode builds, so `--rebuild`
-brings new packages, models and agent versions together.
+pi's packages live in the image under `/opt/pi-packages`; OpenCode's Ponytail
+plugin lives under `/opt/opencode-plugins`. Both load as local paths, without
+runtime npm lookups. Older OpenCode images rebuild automatically to supply the
+plugin; existing npm references are migrated without re-adding a removed plugin.
+Model catalogs come with the pi and opencode builds, so `--rebuild` brings new
+packages, models and agent versions together.
 
 ## Resuming a session
 

@@ -9,7 +9,7 @@ fi
 echo "container $*" >>"$FAKE_DIR/calls"
 case $1 in
 image)
-  [[ $2 == inspect ]] && echo "[{\"config\":{\"labels\":{\"agent-box.entry\":\"${FAKE_ENTRY:-7}\",\"agent-box.ca\":\"${FAKE_CA_STAMP-}\"}}}]"
+  [[ $2 == inspect ]] && echo "[{\"config\":{\"labels\":{\"agent-box.entry\":\"${FAKE_ENTRY:-7}\",\"agent-box.ca\":\"${FAKE_CA_STAMP-}\",\"opencode-box.plugins\":\"${FAKE_OC_PLUGINS:-1}\"}}}]"
   ;;
 network)
   # create --internal NAME / delete NAME: the call itself is in $FAKE_DIR/calls,

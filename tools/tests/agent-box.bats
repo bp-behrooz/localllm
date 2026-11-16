@@ -849,7 +849,8 @@ p = cfg["provider"]["localllm"]
 assert p["options"]["baseURL"] == os.environ["LOCAL_LLM_URL"], p["options"]
 assert p["options"]["apiKey"] == "{env:LOCAL_LLM_API_KEY}", p["options"]
 assert set(p["models"]) == {"qwen3-coder", "llama-4-scout"}, p["models"]
-assert "model" not in cfg, "a pin here would outrank the recent models"'
+assert "model" not in cfg, "a pin here would outrank the recent models"
+assert cfg["plugin"] == ["/opt/opencode-plugins/node_modules/@dietrichgebert/ponytail/.opencode/plugins/ponytail.mjs"]'
 }
 
 @test "opencode sync: OC_BOX_DEFAULT picks where the box starts" {
@@ -958,6 +959,45 @@ print(json.dumps(json.load(open(os.path.join(os.environ["OC_BOX_HOME"],
   TAVILY_API_KEY=tv oc_run --shell -c true
   [[ $status -eq 0 && $(oc_websearch) == false ]]
   run_lacks TAVILY_API_KEY
+}
+
+@test "opencode plugins: migrate npm references, preserve other plugins and removals" {
+  llm_serve qwen3-coder
+  oc_sync
+  local cfg="$OC_BOX_HOME/.config/opencode/opencode.json"
+  echo '{"plugin":["@dietrichgebert/ponytail","other-plugin"]}' >"$cfg"
+  oc_run --shell -c true
+  [[ $status -eq 0 ]]
+  python3 - "$cfg" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+assert cfg["plugin"] == ["/opt/opencode-plugins/node_modules/@dietrichgebert/ponytail/.opencode/plugins/ponytail.mjs", "other-plugin"]
+PY
+  echo '{"plugin":[]}' >"$cfg"
+  oc_run --shell -c true
+  [[ $status -eq 0 ]]
+  python3 - "$cfg" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["plugin"] == []
+PY
+  echo '{}' >"$cfg"
+  oc_run --shell -c true
+  [[ $status -eq 0 ]]
+  python3 - "$cfg" <<'PY'
+import json, sys
+assert "plugin" not in json.load(open(sys.argv[1]))
+PY
+}
+
+@test "opencode plugins: an older image rebuilds with Ponytail baked in" {
+  llm_serve qwen3-coder
+  FAKE_OC_PLUGINS=0 oc_run --shell -c true
+  [[ $status -eq 0 && $output == *"predates the baked-in OpenCode plugins"* ]]
+  call_has "podman build"
+  grep -q 'npm install --prefix /opt/opencode-plugins --omit=dev --legacy-peer-deps' "$FAKE_DIR/Dockerfile"
+  grep -q '@dietrichgebert/ponytail' "$FAKE_DIR/Dockerfile"
+  grep -qx 'LABEL opencode-box.plugins=1' "$FAKE_DIR/Dockerfile"
+  grep -q 'test -f "/opt/opencode-plugins/node_modules/@dietrichgebert/ponytail/.opencode/plugins/ponytail.mjs"' "$FAKE_DIR/Dockerfile"
 }
 
 @test "opencode quiet: no catalog fetch, update check or LSP downloads" {
