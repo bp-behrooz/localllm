@@ -12,6 +12,7 @@ is_radiance qwen3.8-radiance || fail "shipped radiance preset not detected"
 [[ $RAD_REPO == StillDeadcode/qwen3.8-27b-iq8r-dflash ]] || fail "wrong default RAD_REPO: $RAD_REPO"
 is_radiance qwen3.8-flash-next || fail "flash-next radiance preset not detected"
 [[ $RAD == qwen3.8-next-flash-iqr-v4.rad ]] || fail "wrong RAD: $RAD"
+[[ $RAD_REPO == StillDeadcode/qwen3.8-next-flash-iqr-v4 ]] || fail "wrong flash-next RAD_REPO: $RAD_REPO"
 is_radiance gemma4-heretic || fail "gemma4-heretic radiance preset not detected"
 [[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-w4a8 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
 is_radiance thinkingcap || fail "thinkingcap radiance preset not detected"
@@ -100,4 +101,5 @@ pin=$(sed -n 's/^IMAGE=.*@\(sha256:[0-9a-f]*\)}.*/\1/p' pool/serve-radiance.sh)
 grep -q "radiance@$pin" docs/presets.md || fail "docs/presets.md doesn't carry the pin's digest"
 stale=$(grep -o 'radiance@sha256:[0-9a-f]*' docs/presets.md | grep -v "$pin" | sort -u)
 [[ -z $stale ]] || fail "docs/presets.md names a digest the pin doesn't: $stale"
+python3 pool/serve_radiance_test.py || fail "radiance wrapper regression"
 echo "setup-test ok"

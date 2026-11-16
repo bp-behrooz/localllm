@@ -37,6 +37,7 @@ declare -A PRESET=(
   # The other one-card option: a 35B-A3B MoE whose 4-bit experts fit with room
   # for 262K. The card's coding settings; thinking stays on by default.
   [ornith-1.5]="1|cmd|RAD_REPO=keptn/ornith-1.5-35b-a3b-w4a8 MAXLEN=262144 /opt/localllm/serve-radiance.sh ornith-1.5-35b-a3b-w4a8.rad --max-num-seqs 8 --kv-cache-dtype i8 --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 0.6 --top-p 0.95 --top-k 20 --presence-penalty 0"
+  # Flint keeps the pinned engine's sequence/batch defaults; remeasure on pin bumps.
   [flint]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh flint-iq8r.rad --kv-cache-dtype i8"
 )
 

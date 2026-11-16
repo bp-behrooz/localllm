@@ -14,15 +14,18 @@ MODEL_DIR=/opt/localllm/models
 # pinned by digest (2.1.0): presets pass engine flags that releases rename
 # or drop, so bump this together with them
 IMAGE=${RADIANCE_IMAGE:-docker.io/stilldeadcode/radiance@sha256:d3d6c796083b0d00f2b462554aa002f853248506d55658d60d685017abb9b42d}
+# NAME is pool-<preset>-<port>; the YAML model key must match the client's model.
+preset=${NAME#pool-}; preset=${preset%-"$PORT"}
+[[ -n $preset && $NAME == "pool-$preset-$PORT" ]] || {
+  echo "serve-radiance.sh: NAME='$NAME' must be pool-<preset>-$PORT" >&2
+  exit 1
+}
 [ -f "$MODEL_DIR/$model" ] || {
   echo "missing $MODEL_DIR/$model; fetch it with: sudo ./setup.sh download <this preset>" >&2
   exit 1
 }
 podman image exists "$IMAGE" 2>/dev/null || podman pull "$IMAGE"
 tp=$(tr ',' '\n' <<<"$GPUS" | wc -l)
-# NAME is pool-<preset>-<port>; radiance 2.0 routes requests by the YAML model
-# key, and pool.py forwards the client's `"model": "<preset>"` untouched
-preset=${NAME#pool-}; preset=${preset%-"$PORT"}
 exec podman run --replace --name "$NAME" \
   --network host \
   --device /dev/kfd --device /dev/dri \
@@ -33,7 +36,7 @@ exec podman run --replace --name "$NAME" \
   -v "$MODEL_DIR":/models:ro \
   -e HIP_VISIBLE_DEVICES="$GPUS" \
   --entrypoint sh "$IMAGE" -ec \
-  'rad-yaml "$@" >/tmp/radiance.yaml && exec radiance --config /tmp/radiance.yaml' -- \
+  'cfg=$(mktemp /tmp/radiance.XXXXXX.yaml) && rad-yaml "$@" >"$cfg" && { echo "radiance config:"; cat "$cfg"; } >&2 && exec radiance --config "$cfg"' _ \
   --served-model-name "$preset" \
   --model "/models/$model" \
   --host :: --port "$PORT" --tp "$tp" --max-model-len "$MAXLEN" "$@"
