@@ -115,6 +115,17 @@ def load_config(path):
             r["ttl"] = ttl
         except (ValueError, TypeError, OverflowError):
             sys.exit('box-proxy: rule "ttl" must be a positive number')
+    journal = cfg.get("journal")
+    if journal is not None:
+        if not isinstance(journal, dict):
+            sys.exit('box-proxy: "journal" must be an object')
+        path = journal.get("path")
+        if path is not None and (not isinstance(path, str) or not os.path.basename(path)):
+            sys.exit('box-proxy: "journal": "path" must name a file')
+        calls = journal.get("calls")
+        if calls is not None and (not isinstance(calls, list)
+                                  or any(not isinstance(p, str) or not p for p in calls)):
+            sys.exit('box-proxy: "journal": "calls" must be a list of host globs')
     return cfg
 
 

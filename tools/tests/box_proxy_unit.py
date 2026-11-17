@@ -155,6 +155,61 @@ class ProxyTests(unittest.TestCase):
             path.write_text('{"allow":"all","rules":[{"host":"*","with":"{key}","ttl":"60","fake_env":[]}]}')
             self.assertEqual(CLI["load_config"](str(path))["rules"][0]["ttl"], 60)
 
+    def test_journal_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            for journal in (["calls.jsonl"], "calls.jsonl", {"path": 3}, {"path": "/"},
+                            {"path": "dir/"}, {"path": ""}, {"calls": "llm.example.com"},
+                            {"calls": [""]}):
+                path.write_text(json.dumps({"allow": "all", "journal": journal}))
+                with self.subTest(journal=journal), self.assertRaisesRegex(SystemExit, '"journal"'):
+                    CLI["load_config"](str(path))
+            path.write_text(json.dumps({"allow": "all", "journal": {
+                "path": "~/j/calls.jsonl", "calls": ["llm.example.com"]}}))
+            CLI["load_config"](str(path))
+
+    def test_hosts_compare_like_dns_names(self):
+        proxy = addon.BoxProxy()
+        proxy.allow = ["API.GitHub.com.", "*.Example.com"]
+        for host in ("api.github.com", "API.GITHUB.COM.", "x.example.com."):
+            self.assertTrue(proxy.allowed(host), host)
+        self.assertFalse(proxy.allowed("github.com"))
+        proxy.rules = [{"host": "API.GitHub.com", "with": "{x}"}]
+        self.assertIsNotNone(proxy.rule(self.flow("api.github.com.")))
+
+    def test_journal_survives_odd_payloads_and_drops_queries(self):
+        parser = addon.Parser()
+        for obj in ({"choices": "bad"}, {"choices": ["bad"]}, {"output": ["bad"]},
+                    {"choices": [{"delta": {"tool_calls": ["bad"]}}]}):
+            with self.subTest(obj=obj):
+                try:
+                    parser.feed(obj)
+                except (AttributeError, TypeError):
+                    pass  # the callers below must swallow it
+        proxy = addon.BoxProxy()
+        written = []
+        proxy.calls = types.SimpleNamespace(write=written.append)
+        proxy.journal = {"calls": ["*"]}
+        flow = self.flow()
+        flow.id = "f1"
+        flow.request.path = "/v1/chat?access_token=SECRET"
+        flow.response = types.SimpleNamespace(
+            headers={"content-type": "text/event-stream"}, stream=None, get_content=lambda: b"")
+        proxy.responseheaders(flow)
+        tee = flow.response.stream
+        tee(b'data: {"choices": ["bad"]}\n')
+        tee(b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{}"}}]}}]}\n')
+        tee(b"")
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["path"], "/v1/chat")
+        self.assertNotIn("SECRET", json.dumps(written))
+        written.clear()
+        flow.response = types.SimpleNamespace(
+            headers={"content-type": "application/json"},
+            get_content=lambda: b'{"output": ["bad"]}')
+        proxy.response(flow)
+        self.assertEqual(written, [])
+
     def test_fake_env_requires_explicit_valid_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

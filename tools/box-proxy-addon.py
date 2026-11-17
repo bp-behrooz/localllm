@@ -53,6 +53,19 @@ def log(msg):
     ctx.log.info(msg)
 
 
+def host_match(host, pattern):
+    """A host against an allow/rule/journal glob, the way DNS compares names:
+    case-insensitive, a trailing dot ignored."""
+    return fnmatch.fnmatchcase(host.lower().rstrip("."), pattern.lower().rstrip("."))
+
+
+def bare_path(flow):
+    """The request path without its query string, which may carry a token
+    (Google APIs accept access_token= and key=): what matching, the journal
+    and the log see."""
+    return flow.request.path.split("?")[0]
+
+
 class Creds:
     """The values behind `{...}`, kept until their ttl runs out.
 
@@ -280,12 +293,12 @@ class BoxProxy:
     def allowed(self, host):
         if self.allow_all:
             return True
-        return any(fnmatch.fnmatchcase(host, pat) for pat in self.allow)
+        return any(host_match(host, pat) for pat in self.allow)
 
     def rule(self, flow):
-        host, path = flow.request.host, flow.request.path.split("?")[0]
+        host, path = flow.request.host, bare_path(flow)
         for r in self.rules:
-            if not r.get("host") or not fnmatch.fnmatchcase(host, r["host"]):
+            if not r.get("host") or not host_match(host, r["host"]):
                 continue
             if r.get("path") and not fnmatch.fnmatchcase(path, r["path"]):
                 continue
@@ -302,7 +315,7 @@ class BoxProxy:
             flow.response = http.Response.make(
                 403, json.dumps({"error": "egress: not allowed", "host": host}).encode(),
                 {"Content-Type": "application/json"})
-            log(f"denied {flow.request.method} {host}{flow.request.path}")
+            log(f"denied {flow.request.method} {host}{bare_path(flow)}")
             return False
         return True
 
@@ -324,7 +337,7 @@ class BoxProxy:
             body = json.dumps(r["respond"]).encode()
             flow.response = http.Response.make(
                 r.get("status", 200), body, {"Content-Type": "application/json"})
-            log(f"answered {host}{flow.request.path} for {self.cfg.get('session')}")
+            log(f"answered {host}{bare_path(flow)} for {self.cfg.get('session')}")
             return
         # HTTP may pass through, but never with credentials supplied by the host.
         if flow.request.scheme != "https":
@@ -356,7 +369,7 @@ class BoxProxy:
 
     def _journals(self, flow):
         return bool(self.calls) and any(
-            fnmatch.fnmatchcase(flow.request.host, pat)
+            host_match(flow.request.host, pat)
             for pat in self.journal.get("calls") or [])
 
     def _tee(self, flow):
@@ -376,9 +389,11 @@ class BoxProxy:
                 if line.startswith(b"data:"):
                     payload = line[5:].strip()
                     if payload and payload != b"[DONE]":
+                        # Journaling is a side channel: an odd payload costs
+                        # its record, never the stream.
                         try:
                             parser.feed(json.loads(payload))
-                        except (ValueError, TypeError):
+                        except Exception:
                             pass
             return chunk
 
@@ -387,7 +402,7 @@ class BoxProxy:
             self.finishers.pop(flow.id, None)
             if calls is None:
                 return
-            for rec in parser.records(flow.request.host, flow.request.path):
+            for rec in parser.records(flow.request.host, bare_path(flow)):
                 calls.write(rec)
 
         self.finishers[flow.id] = finish
@@ -409,13 +424,12 @@ class BoxProxy:
         calls = self.calls
         if calls is None:
             return
-        try:
-            obj = json.loads(flow.response.get_content() or b"{}")
-        except (ValueError, TypeError):
-            return
         parser = Parser()
-        parser.feed(obj)
-        for rec in parser.records(flow.request.host, flow.request.path):
+        try:
+            parser.feed(json.loads(flow.response.get_content() or b"{}"))
+        except Exception:
+            return
+        for rec in parser.records(flow.request.host, bare_path(flow)):
             calls.write(rec)
 
 
