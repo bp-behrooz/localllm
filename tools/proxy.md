@@ -153,8 +153,16 @@ token rule. Keep Google credential rules scoped to exact hosts, never
 The agent joins only an internal network. Only the proxy also joins an
 outbound network, listed first so macOS selects working routing and DNS.
 Native Linux fencing needs `*_BOX_RUNTIME=crun`; krun and WSL2 require an
-explicit `--no-fence`. Fencing refuses `--ssh`, `--docker`, `--host-port`, and
-`--egress`, which would open other paths out.
+explicit `--no-fence`. Fencing refuses `--ssh`, `--docker`, and `--egress`,
+which would open other paths out.
+
+Host ports (`--host-port`, a profile's `BOX_LAUNCH_PORT`) are ports you chose
+to open, so a fenced box still gets them, relayed by the proxy from its
+fence-network address. The box dials `127.0.0.1:<port>` as before. On a Mac
+the relay connects to the gateway, where socat serves the port to the proxy
+alone. Under podman the proxy's network can't reach the host's loopback, so
+socat serves each port on a Unix socket in a private directory
+(`$XDG_RUNTIME_DIR/agent-box-relay.*`) that only the proxy mounts.
 
 `--no-fence` (or `*_BOX_FENCE=0`) keeps the proxy but permits direct access;
 its allow-list then controls only traffic sent through it. `--no-proxy`

@@ -146,7 +146,8 @@ closes it rather than refusing it. A service in the box can't listen on a
 forwarded port. socat logs out of the agent's way, to
 `~/.local/state/agent-box/socat-<pid>.log` on the host (one per launch, the
 10 newest kept) and to `/tmp/box-entry-socat.log` in the box, with each
-forward's share of a log capped at 1 MiB.
+forward's share of a log capped at 1 MiB. A fenced box reaches the same ports
+through the proxy (see the [proxy guide](proxy.md#fencing-and-trust)).
 
 ### A database without its password
 

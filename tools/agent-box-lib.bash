@@ -813,15 +813,40 @@ _box_forward_addr() {
 # box (see host access above).
 _box_host_port_args() {
   [[ -n ${BOX_HOST_PORTS[*]-} ]] || return 0
-  local list p map=()
+  local list
   list="$(IFS=,; echo "${BOX_HOST_PORTS[*]}")"
+  # A fenced launch picked them when it started the proxy, which relays them.
+  if [[ -n ${BOX_RELAY_IP-} ]]; then
+    BOX_RUN_ARGS+=(--env "BOX_HOST_GATEWAY=$BOX_RELAY_IP" --env "BOX_HOST_PORTS=${BOX_HOST_MAP[*]}")
+    echo "==> host: 127.0.0.1:$list forwarded to the host through the proxy (only those, only this box)" >&2
+    return 0
+  fi
   if [[ ${BOX_CTR[0]} == podman ]]; then
     BOX_PASTA_FWD+=("${BOX_HOST_PORTS[@]}")
     echo "==> host: 127.0.0.1:$list forwarded to the host (only those)" >&2
     return 0
   fi
 
-  local info
+  _box_host_port_map
+  BOX_RUN_ARGS+=(--env "BOX_HOST_GATEWAY=$(_box_gateway)" --env "BOX_HOST_PORTS=${BOX_HOST_MAP[*]}")
+  echo "==> host: 127.0.0.1:$list forwarded to the Mac (only those, only this box)" >&2
+}
+
+# Where each --host-port port goes, for a Mac or a fenced box. BOX_HOST_MAP
+# holds the port:gateway port pairs box-entry relays from the box's 127.0.0.1;
+# fenced, the proxy is the gateway, and BOX_RELAY_SPECS tells its relay what
+# each of its ports leads to.
+#
+# Mac: a free gateway port per port, served by socat once the box (fenced: the
+# proxy) is up. podman, fenced: the proxy's bridge network can't reach the
+# host's loopback, but under crun a Unix socket crosses into a container, so
+# socat serves each port on one in a private directory the proxy mounts. The
+# relay's ports are its own, from 24100: nothing else listens in the proxy.
+BOX_HOST_MAP=()
+BOX_RELAY_SPECS=()
+_box_host_port_map() {
+  local info p hint="brew install socat" i=0
+  [[ ${BOX_CTR[0]} == podman ]] && hint="sudo pacman -S socat"
   info="$(_box_entry_version)"
   # 7 brought box-entry's port:gateway-port pairs, which this needs; 8 only
   # moved its socat's messages into a log
@@ -830,16 +855,30 @@ _box_host_port_args() {
     exit 1
   }
   command -v socat >/dev/null || {
-    echo "error: --host-port needs socat (brew install socat)" >&2
+    echo "error: --host-port needs socat ($hint)" >&2
     exit 1
   }
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    # Short, for the 108-byte limit on a socket's path; mktemp makes it 0700.
+    BOX_RELAY_SOCKS="$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/agent-box-relay.XXXXXX")"
+    _box_at_exit "rm -rf '$BOX_RELAY_SOCKS'"
+    for p in "${BOX_HOST_PORTS[@]}"; do
+      socat "UNIX-LISTEN:$BOX_RELAY_SOCKS/$p.sock,fork,mode=600,unlink-early" \
+        "TCP:127.0.0.1:$p" 2> >(_box_socat_to) &
+      # -9: SIGTERM makes socat log "exiting on signal 15" over the agent's last words
+      _box_at_exit "kill -9 $! 2>/dev/null"
+      BOX_HOST_MAP+=("$p:$((24100 + i))")
+      BOX_RELAY_SPECS+=("$((24100 + i))=unix:/run/box-relay/$p.sock")
+      i=$((i + 1))
+    done
+    return 0
+  fi
   for p in "${BOX_HOST_PORTS[@]}"; do
     _box_free_port "$(_box_gateway)"
     BOX_MAC_FWD+=("$BOX_FREE_PORT TCP:127.0.0.1:$p")
-    map+=("$p:$BOX_FREE_PORT")
+    BOX_HOST_MAP+=("$p:$BOX_FREE_PORT")
+    BOX_RELAY_SPECS+=("$BOX_FREE_PORT")
   done
-  BOX_RUN_ARGS+=(--env "BOX_HOST_GATEWAY=$(_box_gateway)" --env "BOX_HOST_PORTS=${map[*]}")
-  echo "==> host: 127.0.0.1:$list forwarded to the Mac (only those, only this box)" >&2
 }
 
 # _box_free_port ADDR: set BOX_FREE_PORT to a port in BOX_BRIDGE_PORTS that
@@ -906,13 +945,14 @@ _box_forward_args() {
     done
     BOX_RUN_ARGS+=(--network "$net")
   elif [[ -n ${BOX_MAC_FWD[*]-} ]]; then
-    _box_mac_forwards "$BOX_RUN_NAME"
+    _box_mac_forwards "$BOX_RUN_NAME" ${BOX_RELAY_FROM:+"$BOX_RELAY_FROM"}
   fi
 }
 
-# _box_mac_forwards NAME: in the background, wait for the box NAME to show up in
-# `container ls` with an IP, then serve each BOX_MAC_FWD on the gateway to that
-# IP alone (socat's range=), so no other box can use them. A forward is up a
+# _box_mac_forwards NAME [IP]: in the background, wait for the box NAME to show
+# up in `container ls` with an IP, then serve each BOX_MAC_FWD on the gateway to
+# that IP alone (socat's range=), so no other box can use them. A fenced box's
+# forwards go to its proxy's relay instead, at IP, known before the box starts. A forward is up a
 # moment after the box; the agent takes longer than that to start. Each socat
 # writes its own PID to a file before it starts, and the exit trap reads that
 # file only after killing the watcher, so one spawned as the launch ends isn't
@@ -923,8 +963,9 @@ _box_mac_forwards() {
   gw="$(_box_gateway)"
   pids="$(mktemp "${TMPDIR:-/tmp}/agent-box-fwd.XXXXXX")"
   (
-    ip=
+    ip=${2-}
     for ((i = 0; i < 1200; i++)); do
+      [[ -z $ip ]] || break
       ip="$(container ls 2>/dev/null | awk -v n="$name" \
         '$1 == n && $5 == "running" && $6 ~ /^[0-9.]+\// { sub(/\/.*/, "", $6); print $6 }')"
       [[ -z $ip ]] || break
@@ -1284,8 +1325,11 @@ box_env() {
 # --proxy=PATH. Secrets are rendered host-side (box-proxy render) into a
 # directory mounted read-only; `{cmd:...}` becomes a file a host-side refresher
 # keeps current, since the container has neither the keychain nor the cloud CLI.
-# What the proxy container runs: the CA into a writable place, then mitmdump.
-BOX_PROXY_SH='mkdir -p /tmp/mitm; cp /ca/*.pem /tmp/mitm/ 2>/dev/null; exec mitmdump -q --mode regular@0.0.0.0:8080 --set confdir=/tmp/mitm --set block_global=false -s /etc/box-proxy/addon.py'
+# What the proxy container runs: the CA into a writable place, the fenced box's
+# relay to its host ports if it has any (BOX_RELAY: gateway and ports), then
+# mitmdump.
+# shellcheck disable=SC2016 # $BOX_RELAY expands in the container
+BOX_PROXY_SH='mkdir -p /tmp/mitm; cp /ca/*.pem /tmp/mitm/ 2>/dev/null; [ -z "$BOX_RELAY" ] || python3 /etc/box-proxy/relay.py $BOX_RELAY & exec mitmdump -q --mode regular@0.0.0.0:8080 --set confdir=/tmp/mitm --set block_global=false -s /etc/box-proxy/addon.py'
 PROXY_SH=$BOX_PROXY_SH
 
 _box_proxy_start() {
@@ -1368,6 +1412,19 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
     # Apple takes the gateway and DNS from the first network: default first.
     # Only the proxy joins both networks; the box stays on the internal one.
     args+=(--network "$(_box_default_net)" --network "$BOX_FENCE_NET")
+    # The host ports' forwards are picked now, as the relay needs them at start.
+    if [[ -n ${BOX_HOST_PORTS[*]-} ]]; then
+      _box_host_port_map
+      cp "$BOX_LIB_DIR/box-proxy-relay.py" "$dir/relay.py"
+      # The relay's first argument only has to be reached the outbound way:
+      # the Mac's gateway, which it dials; under podman any outside address
+      # (TEST-NET-1, never dialed), as the fence network has no default route.
+      if [[ ${BOX_CTR[0]} == podman ]]; then
+        args+=(-e "BOX_RELAY=192.0.2.1 ${BOX_RELAY_SPECS[*]}" -v "$BOX_RELAY_SOCKS:/run/box-relay")
+      else
+        args+=(-e "BOX_RELAY=$(_box_gateway) ${BOX_RELAY_SPECS[*]}")
+      fi
+    fi
   elif [[ ${BOX_CTR[0]} == podman ]]; then
     # krun's pasta network reaches the host's loopback and nothing else, so the
     # proxy is published there -- the same door --host-port uses.
@@ -1417,6 +1474,15 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
     [[ -n $ip ]] || _box_proxy_no_address "$name" "$BOX_FENCE_NET"
     url="http://$ip:8080"
     echo "==> proxy: $url (the box's address for it)" >&2
+    if [[ -n ${BOX_HOST_MAP[*]-} ]]; then
+      # The box dials the relay here. On a Mac the host serves the forwards to
+      # the proxy's outbound address alone.
+      BOX_RELAY_IP=$ip
+      if [[ ${BOX_CTR[0]} == container ]]; then
+        BOX_RELAY_FROM="$(_box_container_ip "$name" "$(_box_default_net)")" || BOX_RELAY_FROM=
+        [[ -n $BOX_RELAY_FROM ]] || _box_proxy_no_address "$name" "$(_box_default_net)"
+      fi
+    fi
   elif [[ ${BOX_CTR[0]} == container ]]; then
     ip="$(_box_container_ip "$name" "$BOX_PROXY_NET")" || ip=
     [[ -n $ip ]] || _box_proxy_no_address "$name" "$BOX_PROXY_NET"
@@ -1549,8 +1615,8 @@ for n in nets:
 # there, so everything the box fetches goes through it or nowhere. That is what
 # makes `"allow": "none"` mean offline rather than "the polite tools stay in".
 #
-# Linux podman under crun only, and nothing that would open another way out.
-# Under krun the box's networking is not a podman bridge, so the fence has
+# Linux podman under crun only, and nothing that would open another way out,
+# except the host ports you name, which the proxy relays. Under krun the box's networking is not a podman bridge, so the fence has
 # nothing to cut: set *_BOX_RUNTIME=crun for a fenced launch.
 _box_fence_start() {
   # Fence by default whenever the proxy is on; only an explicit opt-out skips it.
@@ -1585,10 +1651,8 @@ _box_fence_start() {
     exit 1
   fi
   local knob
-  [[ -z ${BOX_HOST_PORTS[*]-} ]] || {
-    echo "error: --fence leaves no way out; drop --host-port" >&2
-    exit 1
-  }
+  # A host port is one you named, so it may cross: the proxy relays it
+  # (_box_host_port_map). ssh, docker and egress would open everything.
   for knob in SSH DOCKER EGRESS; do
     [[ -z "$(box_knob "$knob")" || "$(box_knob "$knob")" == 0 ]] || {
       echo "error: --fence leaves no way out; drop --$(tr 'A-Z_' 'a-z-' <<<"$knob")" >&2

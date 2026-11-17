@@ -1623,8 +1623,56 @@ PY
   export CL_BOX_RUNTIME=crun
   proxy_stub
   echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
-  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --host-port=5432 --shell -c true
-  [[ $status -ne 0 && $output == *"leaves no way out"* ]]
+  CL_BOX_SSH=1 run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
+  [[ $status -ne 0 && $output == *"leaves no way out; drop --ssh"* ]]
+}
+
+@test "fence: under podman a host port goes through the proxy, over a private socket" {
+  command -v socat >/dev/null || skip "socat is not on PATH"
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --host-port=5432,6379 --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $output == *"127.0.0.1:5432,6379 forwarded to the host through the proxy"* ]]
+  # the box dials the proxy's fence address, on the relay's own ports
+  run_has --env BOX_HOST_GATEWAY=127.0.0.2
+  run_has --env "BOX_HOST_PORTS=5432:24100 6379:24101"
+  awk -v r="BOX_RELAY=192.0.2.1 24100=unix:/run/box-relay/5432.sock 24101=unix:/run/box-relay/6379.sock" \
+    'p == "-e" && $0 == r { f = 1 } { p = $0 } END { exit !f }' "$FAKE_DIR/proxy.args"
+  local socks
+  socks="$(awk -F: 'p == "-v" && $2 == "/run/box-relay" { print $1 } { p = $0 }' "$FAKE_DIR/proxy.args")"
+  [[ $socks == "$XDG_RUNTIME_DIR"/agent-box-relay.* ]]
+  # no pasta forwards: the fence network is the box's only one, and the
+  # sockets and their socat are gone with the launch
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args") == cl-net-* ]]
+  [[ ! -e $socks ]]
+  run pgrep -f "UNIX-LISTEN:$socks"
+  [[ $status -ne 0 ]]
+}
+
+@test "fence: on a Mac a launch port goes through the proxy, to the proxy alone" {
+  as_mac
+  fake_mac_tools
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  printf 'BOX_LAUNCH_PORT=PGPORT\n' >"$HOME/.box.db.env"
+  FAKE_RUN_SLEEP=3 run_box --profile db --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
+  [[ $status -eq 0 ]]
+  [[ $output == *"forwarded to the host through the proxy"* ]]
+  [[ $output != *"nothing listens"* ]]
+  local pg gw
+  pg="$(sed -n 's/.*PGPORT=\([0-9]*\), for this launch.*/\1/p' <<<"$output")"
+  gw="$(sed -n "s#^BOX_HOST_PORTS=$pg:\([0-9]*\)\$#\1#p" "$FAKE_DIR/run.args")"
+  [[ -n $pg && -n $gw ]]
+  # the box dials the proxy's fence address; the proxy relays to the gateway
+  run_has --env BOX_HOST_GATEWAY=127.0.0.2
+  awk -v r="BOX_RELAY=192.168.64.1 $gw" 'p == "-e" && $0 == r { f = 1 } { p = $0 } END { exit !f }' \
+    "$FAKE_DIR/proxy.args"
+  # and the gateway serves it to the proxy's outbound address only
+  grep -qxF "TCP-LISTEN:$gw,bind=192.168.64.1,reuseaddr,fork,range=127.0.0.2/32 TCP:127.0.0.1:$pg" \
+    "$FAKE_DIR/socat.calls"
+  [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args" | wc -l) -eq 1 ]]
 }
 
 @test "fence: unsupported runtimes fail closed unless explicitly opted out" {
