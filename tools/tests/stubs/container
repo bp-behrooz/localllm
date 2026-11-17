@@ -28,7 +28,10 @@ except OSError:
 nets = [args[i + 1] for i, a in enumerate(args) if a == "--network" and i + 1 < len(args)]
 # the field is "network", as container inspect prints it
 print(json.dumps([{"status": {"networks": [
-    {"network": n, "ipv4Address": "127.0.0.2/32"} for n in nets]}}]))
+    # the default network gets an address of its own, so a launch that reads
+    # the wrong network's shows it
+    {"network": n, "ipv4Address": ("127.0.0.3" if n == "default" else "127.0.0.2") + "/32"}
+    for n in nets]}}]))
 EOF
   ;;
 ls)

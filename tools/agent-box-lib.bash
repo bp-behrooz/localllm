@@ -409,7 +409,16 @@ _box_ca_stamp() {
 }
 
 _box_ca_ensure() {
-  [[ -f "$(_box_ca_cert)" ]] && return 0
+  local dir
+  dir="$(_box_ca_dir)"
+  # The proxy signs with the key, in the bundle mitmproxy reads; without them
+  # it would quietly make a CA of its own that no image trusts.
+  [[ -f "$(_box_ca_cert)" && -f $dir/mitmproxy-ca-key.pem && -f $dir/mitmproxy-ca.pem ]] && return 0
+  if [[ -f "$(_box_ca_cert)" && ! -f $dir/mitmproxy-ca-key.pem ]]; then
+    echo "error: the proxy CA in $dir has its certificate but no key; restore" >&2
+    echo "       mitmproxy-ca-key.pem, or delete the directory for a new CA (then --rebuild)" >&2
+    exit 1
+  fi
   mkdir -p "$(_box_ca_dir)"
   "$BOX_LIB_DIR/box-proxy" ca --confdir "$(_box_ca_dir)" >/dev/null || {
     echo "error: could not create the proxy CA; openssl has to be installed" >&2
@@ -1344,7 +1353,7 @@ box_env() {
 # relay to its host ports if it has any (BOX_RELAY: gateway and ports), then
 # mitmdump.
 # shellcheck disable=SC2016 # $BOX_RELAY expands in the container
-BOX_PROXY_SH='mkdir -p /tmp/mitm; cp /ca/*.pem /tmp/mitm/ 2>/dev/null; [ -z "$BOX_RELAY" ] || python3 /etc/box-proxy/relay.py $BOX_RELAY & exec mitmdump -q --mode regular@0.0.0.0:8080 --set confdir=/tmp/mitm --set block_global=false -s /etc/box-proxy/addon.py'
+BOX_PROXY_SH='mkdir -p /tmp/mitm; cp /ca/*.pem /tmp/mitm/ && [ -f /tmp/mitm/mitmproxy-ca.pem ] || { echo "box-proxy: no CA bundle in /ca; not starting with a CA of its own" >&2; exit 1; }; [ -z "$BOX_RELAY" ] || python3 /etc/box-proxy/relay.py $BOX_RELAY & exec mitmdump -q --mode regular@0.0.0.0:8080 --set confdir=/tmp/mitm --set block_global=false -s /etc/box-proxy/addon.py'
 PROXY_SH=$BOX_PROXY_SH
 
 _box_proxy_start() {
@@ -1367,6 +1376,11 @@ _box_proxy_start() {
   local want have
   want="$(_box_ca_stamp)"
   have="$(_box_image_text_label agent-box.ca)"
+  [[ -n $have ]] || {
+    echo "error: --proxy: $BOX_IMAGE predates the proxy CA, so its TLS requests" >&2
+    echo "       would fail. Rerun with --rebuild." >&2
+    exit 1
+  }
   [[ $want == "$have" ]] || {
     echo "error: --proxy: $BOX_IMAGE was built with another CA ($have); its TLS" >&2
     echo "       requests would fail. Rerun with --rebuild." >&2
@@ -1390,6 +1404,10 @@ print(a if isinstance(a, str) else ", ".join(map(str, a or [])))' "$cfg")" || ex
   # a bind mount has to be on a path the runtime shares with its VM.
   dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-box/proxy/$BOX_SESSION"
   mkdir -p "$dir"
+  # Queued before the render writes secrets into it, so a render or anything
+  # after it that fails still takes them away. PROXY_PRINT keeps it for the
+  # command it prints.
+  [[ "$(box_knob PROXY_PRINT)" == 1 ]] || _box_at_exit "rm -rf '$dir'"
   script="$("$BOX_LIB_DIR/box-proxy" render --config "$cfg" --dir "$dir" \
     --out "$dir/proxy.json" --session "$BOX_SESSION")" || {
     echo "error: --proxy: could not render $cfg" >&2
@@ -1442,10 +1460,11 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
     fi
   elif [[ ${BOX_CTR[0]} == podman ]]; then
     # Unfenced: the box's pasta network reaches the host's loopback, so the
-    # proxy is published there -- the same door --host-port uses.
+    # proxy is published there -- the same door --host-port uses, though not
+    # one of your --host-port ports.
     _box_free_port 127.0.0.1
     port=$BOX_FREE_PORT
-    _box_ports "$port"
+    BOX_PASTA_FWD+=("$port")
     args+=(--network podman -p "127.0.0.1:$port:8080")
   else
     # A Mac: containers on the default network cannot reach each other, and a
@@ -1471,7 +1490,6 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
     printf '\n' >&2
     exit 1
   fi
-  _box_at_exit "rm -rf '$dir'"
   echo "==> proxy: starting $name" >&2
   # `mitmdump` by name: the image's entrypoint execs whatever it is given, so a
   # dash-first argument becomes an option to exec itself. The CA is copied out
@@ -1636,10 +1654,16 @@ for n in nets:
 # on the fence network like any container. Not WSL2 yet.
 _box_fence_start() {
   # Fence by default whenever the proxy is on; only an explicit opt-out skips it.
+  # Anything else is refused rather than read as off: a typo must not quietly
+  # open the network.
   case "$(box_knob FENCE)" in
   "") _box_proxy_enabled || return 0 ;;
   1) ;;
-  *) return 0 ;;
+  0) return 0 ;;
+  *)
+    echo "error: ${BOX_ENV_PREFIX}_FENCE='$(box_knob FENCE)': use 1 to force the fence, 0 for --no-fence" >&2
+    exit 1
+    ;;
   esac
   # A fence is a fence around the proxy, so it brings one: --proxy=PATH picks
   # the config, and on its own --fence means ~/.box.<profile>.proxy.json. A

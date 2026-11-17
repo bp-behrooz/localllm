@@ -1310,6 +1310,8 @@ EOF
   mkdir -p "$BOX_PROXY_CONFDIR"
   printf -- '-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n' \
     >"$BOX_PROXY_CONFDIR/mitmproxy-ca-cert.pem"
+  printf -- 'fake key\n' >"$BOX_PROXY_CONFDIR/mitmproxy-ca-key.pem"
+  cat "$BOX_PROXY_CONFDIR"/mitmproxy-ca-{key,cert}.pem >"$BOX_PROXY_CONFDIR/mitmproxy-ca.pem"
   if command -v sha256sum >/dev/null 2>&1; then
     export FAKE_CA_STAMP="$(sha256sum "$BOX_PROXY_CONFDIR/mitmproxy-ca-cert.pem" | cut -c1-16)"
   else
@@ -1332,6 +1334,34 @@ EOF
   grep -q "^HTTPS_PROXY=http://127.0.0.1:$port$" "$FAKE_DIR/run.args"
   grep -q '^BOX_SESSION=' "$FAKE_DIR/run.args"
   run_has --network "pasta:-T,$port"
+  # the proxy's port is forwarded, but it isn't one of yours
+  [[ $output != *"==> host:"* ]]
+}
+
+@test "proxy: a failed render leaves no rendered secrets behind" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  export SECRET_TOKEN=s3cr3t
+  echo '{"allow":"all","rules":[{"host":"a.example.com","with":"Bearer {env:SECRET_TOKEN}","fake_env":[]},{"host":"b.example.com","with":"Bearer {cmd:exit 3}","fake_env":[]}]}' \
+    >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -ne 0 && $output == *"could not render"* ]]
+  run grep -rl s3cr3t "$XDG_STATE_HOME/agent-box/proxy"
+  [[ $status -ne 0 ]]
+}
+
+@test "proxy: a CA missing its key, or an image without the CA, is named as such" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"all"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  FAKE_CA_STAMP= run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -ne 0 && $output == *"predates the proxy CA"* ]]
+  rm "$BOX_PROXY_CONFDIR/mitmproxy-ca-key.pem"
+  run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -ne 0 && $output == *"certificate but no key"* ]]
+  # and the proxy container itself won't start on a CA of its own
+  load_lib
+  [[ $BOX_PROXY_SH == *'[ -f /tmp/mitm/mitmproxy-ca.pem ] || {'*'exit 1; }'* ]]
 }
 
 @test "proxy: --proxy without a config stops before anything runs" {
@@ -1691,8 +1721,9 @@ PY
   run_has --env BOX_HOST_GATEWAY=127.0.0.2
   awk -v r="BOX_RELAY=192.168.64.1 $gw" 'p == "-e" && $0 == r { f = 1 } { p = $0 } END { exit !f }' \
     "$FAKE_DIR/proxy.args"
-  # and the gateway serves it to the proxy's outbound address only
-  grep -qxF "TCP-LISTEN:$gw,bind=192.168.64.1,reuseaddr,fork,range=127.0.0.2/32 TCP:127.0.0.1:$pg" \
+  # and the gateway serves it to the proxy's outbound (default-network) address
+  # only, not its fence one
+  grep -qxF "TCP-LISTEN:$gw,bind=192.168.64.1,reuseaddr,fork,range=127.0.0.3/32 TCP:127.0.0.1:$pg" \
     "$FAKE_DIR/socat.calls"
   [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args" | wc -l) -eq 1 ]]
 }
@@ -1705,6 +1736,21 @@ PY
   [[ $BOX_FENCE_NET == cl-net-* ]]
   [[ " ${BOX_RUN_ARGS[*]} " == *" --network $BOX_FENCE_NET "* ]]
   call_has "network create --internal --disable-dns $BOX_FENCE_NET"
+}
+
+@test "fence: a knob value that isn't 0 or 1 is refused, not read as off" {
+  load_lib
+  BOX_CTR=(podman)
+  CL_BOX_PROXY=1 CL_BOX_RUNTIME=crun
+  local v
+  for v in yes true on 2 off; do
+    CL_BOX_FENCE=$v
+    run _box_fence_start
+    [[ $status -ne 0 && $output == *"CL_BOX_FENCE='$v'"* ]]
+  done
+  CL_BOX_FENCE=0
+  run _box_fence_start
+  [[ $status -eq 0 && -z $output ]]
 }
 
 @test "fence: WSL2 fails closed unless explicitly opted out" {
