@@ -44,6 +44,10 @@ boxes refuse to start otherwise. Proxying and network fencing are on by
 default, under krun and crun alike. krun needs read/write on `/dev/kvm` (the
 `kvm` group); `*_BOX_RUNTIME=crun` runs a plain container instead, e.g.
 `OC_BOX_RUNTIME=crun opencode-box`. The runtime is never silently switched.
+Under krun a TCP listener on port 0 is unreachable ([libkrun
+#818](https://github.com/libkrun/libkrun/issues/818)), which breaks opencode's
+TUI among others, so krun boxes preload `box-bind0.so` to give such listeners
+a random fixed port; an image built before it needs `--rebuild`.
 
 Files created in the box by a non-root uid land in your subuid range on the
 host. The agents run as root, so that's rare.

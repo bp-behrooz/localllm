@@ -23,6 +23,8 @@ image)
       echo "${FAKE_CA_STAMP-}"
     elif [[ $* == *opencode-box.plugins* ]]; then
       echo "${FAKE_OC_PLUGINS:-1}"
+    elif [[ $* == *agent-box.bind0* ]]; then
+      echo "${FAKE_BIND0-1234}"
     else
       echo "${FAKE_ENTRY:-7}"
     fi

@@ -39,6 +39,28 @@ load helpers
   [[ " ${BOX_RUN_ARGS[*]} " == *" krun.cpus=2 "* ]]
 }
 
+@test "runtime: krun preloads the port-0 fix, or says to rebuild for it" {
+  load_lib
+  BOX_CTR=(podman) BOX_RUN_ARGS=()
+  _box_runtime_args 2>/dev/null
+  [[ " ${BOX_RUN_ARGS[*]} " == *" --env LD_PRELOAD=/usr/local/lib/box-bind0.so "* ]]
+  BOX_RUN_ARGS=()
+  CL_BOX_RUNTIME=crun
+  _box_runtime_args 2>/dev/null
+  [[ ${BOX_RUN_ARGS[*]} != *LD_PRELOAD* ]]
+  BOX_RUN_ARGS=()
+  CL_BOX_RUNTIME=krun
+  FAKE_BIND0= run _box_runtime_args
+  [[ $output == *"predates the port-0 fix"* ]]
+}
+
+@test "image: every image builds the port-0 fix, labeled with its checksum" {
+  load_lib
+  run box_dockerfile_base
+  [[ $output == *"cc -shared -fPIC -O2 -o /usr/local/lib/box-bind0.so"* ]]
+  [[ $output == *"LABEL agent-box.bind0=$(_box_bind0_stamp)"* ]]
+}
+
 @test "runtime: krun refuses memory it can't size" {
   load_lib
   BOX_RUN_ARGS=()

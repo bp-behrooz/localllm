@@ -521,7 +521,22 @@ RUN mkdir -p /etc/box-entry.d /etc/box-exit.d \
 LABEL agent-box.entry=8
 
 EOF
+  _box_dockerfile_bind0
   _box_dockerfile_ca
+}
+
+# box-bind0.c, built into every image; _box_runtime_args preloads it under krun
+# (see the file). The label is its checksum, so a launch can tell an image
+# that has it, and an edit to it changes this layer.
+BOX_BIND0_SO=/usr/local/lib/box-bind0.so
+_box_bind0_stamp() { cksum <"$BOX_LIB_DIR/box-bind0.c" | cut -d' ' -f1; }
+_box_dockerfile_bind0() {
+  printf '%s\n' \
+    "# krun: TCP listeners on port 0 are unreachable (libkrun #818); see box-bind0.c" \
+    "RUN printf '%s' '$(base64 <"$BOX_LIB_DIR/box-bind0.c" | tr -d '\n')' | base64 -d >/tmp/box-bind0.c \\" \
+    " && cc -shared -fPIC -O2 -o $BOX_BIND0_SO /tmp/box-bind0.c -ldl \\" \
+    " && rm /tmp/box-bind0.c" \
+    "LABEL agent-box.bind0=$(_box_bind0_stamp)"
 }
 
 # Your own additions to the image, appended after the agent's tail:
@@ -1918,6 +1933,14 @@ _box_runtime_args() {
   BOX_RUN_ARGS+=(--annotation "krun.cpus=$(box_knob CPUS 4)"
     --annotation "krun.ram_mib=$mem")
   echo "==> runtime: krun (${mem} MiB, $(box_knob CPUS 4) vCPUs)" >&2
+  # A listener on port 0 is unreachable under krun (box-bind0.c), which stops
+  # opencode's TUI from reaching its own server. Not fatal without it: most
+  # agents never bind port 0.
+  if [[ -n "$(_box_image_text_label agent-box.bind0)" ]]; then
+    BOX_RUN_ARGS+=(--env "LD_PRELOAD=$BOX_BIND0_SO")
+  else
+    echo "==> krun: $BOX_IMAGE predates the port-0 fix; --rebuild if a listener is unreachable" >&2
+  fi
 }
 
 # A linked worktree's (or submodule's) .git is a file pointing into the main
