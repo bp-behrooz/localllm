@@ -300,6 +300,10 @@ can bring its own services. For example, `~/.box.data.dockerfile` for
 ```dockerfile
 # Redis from Ubuntu; PostgreSQL (a chosen major) and MongoDB from their own repos
 ARG PG=17
+# A fixed uid for postgres, which the package reuses: one handed out by apt can
+# change on a rebuild, and Postgres won't start on data an unknown uid owns
+RUN groupadd -r -g 990 postgres \
+ && useradd -r -u 990 -g postgres -d /var/lib/postgresql -s /bin/bash postgres
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gnupg \
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -317,9 +321,11 @@ RUN apt-get update \
  && sed -i 's/scram-sha-256$/trust/' /etc/postgresql/$PG/main/pg_hba.conf \
  && mkdir -p /var/lib/redis /var/lib/mongodb
 
-# Started before the agent, stopped cleanly after it.
+# Started before the agent, stopped cleanly after it. The chown takes back data
+# an older image's postgres uid wrote; once the owner matches it does nothing.
 RUN printf '%s\n' '#!/bin/sh' 'set -e' \
       'redis-server --daemonize yes --dir /var/lib/redis >/dev/null' \
+      '[ "$(stat -c %u /var/lib/postgresql)" = "$(id -u postgres)" ] || chown -R postgres:postgres /var/lib/postgresql' \
       "pg_ctlcluster $PG main start" \
       'mongod --fork --dbpath /var/lib/mongodb --logpath /var/log/mongod.log >/dev/null' \
       >/etc/box-entry.d/10-services \
