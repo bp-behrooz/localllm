@@ -1675,19 +1675,26 @@ PY
   [[ $(awk '$0 == "--network" { getline; print }' "$FAKE_DIR/run.args" | wc -l) -eq 1 ]]
 }
 
-@test "fence: unsupported runtimes fail closed unless explicitly opted out" {
+@test "fence: krun's VM goes on the fence network like a container" {
+  load_lib
+  BOX_CTR=(podman) BOX_RUN_ARGS=()
+  CL_BOX_PROXY=1 CL_BOX_RUNTIME=krun
+  _box_fence_start 2>/dev/null
+  [[ $BOX_FENCE_NET == cl-net-* ]]
+  [[ " ${BOX_RUN_ARGS[*]} " == *" --network $BOX_FENCE_NET "* ]]
+  call_has "network create --internal --disable-dns $BOX_FENCE_NET"
+}
+
+@test "fence: WSL2 fails closed unless explicitly opted out" {
   load_lib
   BOX_CTR=(podman)
-  CL_BOX_PROXY=1 CL_BOX_RUNTIME=krun
-  run _box_fence_start
-  [[ $status -ne 0 && $output == *"plain container"* && $output == *"--no-fence"* ]]
-  box_parse_args --no-fence
-  run _box_fence_start
-  [[ $status -eq 0 ]]
   as_wsl
-  CL_BOX_FENCE=1 CL_BOX_RUNTIME=crun
+  CL_BOX_PROXY=1 CL_BOX_FENCE=1 CL_BOX_RUNTIME=crun
   run _box_fence_start
   [[ $status -ne 0 && $output == *"WSL2"* && $output == *"--no-fence"* ]]
+  CL_BOX_FENCE=0
+  run _box_fence_start
+  [[ $status -eq 0 ]]
 }
 
 # -------------------------------------------------------------------- gpu -----

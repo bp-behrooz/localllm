@@ -152,8 +152,9 @@ token rule. Keep Google credential rules scoped to exact hosts, never
 
 The agent joins only an internal network. Only the proxy also joins an
 outbound network, listed first so macOS selects working routing and DNS.
-Native Linux fencing needs `*_BOX_RUNTIME=crun`; krun and WSL2 require an
-explicit `--no-fence`. Fencing refuses `--ssh`, `--docker`, and `--egress`,
+On Linux this works under both crun and krun: libkrun opens the VM's sockets
+in the container's network namespace, so the VM sits on the internal network
+too. WSL2 requires an explicit `--no-fence`. Fencing refuses `--ssh`, `--docker`, and `--egress`,
 which would open other paths out.
 
 Host ports (`--host-port`, a profile's `BOX_LAUNCH_PORT`) are ports you chose

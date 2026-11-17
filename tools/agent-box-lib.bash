@@ -1318,8 +1318,8 @@ box_env() {
 # A container on both platforms: on a Mac a host process has no address the box
 # could reach, and keeping one shape is worth more than saving a container.
 # What differs is only how the box gets to it -- a published loopback port under
-# krun (whose pasta network reaches nothing else), the container's address on a
-# shared network elsewhere, the fence network's when --fence is on.
+# podman unfenced, the container's address on a shared network on a Mac, the
+# fence network's when --fence is on (krun included).
 #
 # The config is ~/.box.<profile>.proxy.json with --proxy, or the path with
 # --proxy=PATH. Secrets are rendered host-side (box-proxy render) into a
@@ -1426,7 +1426,7 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
       fi
     fi
   elif [[ ${BOX_CTR[0]} == podman ]]; then
-    # krun's pasta network reaches the host's loopback and nothing else, so the
+    # Unfenced: the box's pasta network reaches the host's loopback, so the
     # proxy is published there -- the same door --host-port uses.
     _box_free_port 127.0.0.1
     port=$BOX_FREE_PORT
@@ -1615,9 +1615,10 @@ for n in nets:
 # there, so everything the box fetches goes through it or nowhere. That is what
 # makes `"allow": "none"` mean offline rather than "the polite tools stay in".
 #
-# Linux podman under crun only, and nothing that would open another way out,
-# except the host ports you name, which the proxy relays. Under krun the box's networking is not a podman bridge, so the fence has
-# nothing to cut: set *_BOX_RUNTIME=crun for a fenced launch.
+# Nothing that would open another way out, except the host ports you name,
+# which the proxy relays. krun fences too: libkrun hands the guest's sockets to
+# the VMM, which opens them in the container's network namespace, so the VM is
+# on the fence network like any container. Not WSL2 yet.
 _box_fence_start() {
   # Fence by default whenever the proxy is on; only an explicit opt-out skips it.
   case "$(box_knob FENCE)" in
@@ -1638,12 +1639,6 @@ _box_fence_start() {
   if [[ ${BOX_CTR[0]} == podman ]]; then
     ! _box_is_wsl || {
       echo "error: --fence is not wired up for WSL2; --no-fence opts out of enforcement" >&2
-      exit 1
-    }
-    _box_is_krun && {
-      echo "error: --fence needs a plain container: krun's VM has its own network," >&2
-      echo "       which a podman network cannot fence; set ${BOX_ENV_PREFIX}_RUNTIME=crun" >&2
-      echo "       or use --no-fence to keep the VM without enforced egress." >&2
       exit 1
     }
   elif [[ ${BOX_CTR[0]} != container ]]; then

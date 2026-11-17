@@ -41,10 +41,9 @@ systemctl --user enable --now podman.socket   # only for --docker
 
 podman must be rootless, so what the agent writes stays owned by you; the
 boxes refuse to start otherwise. Proxying and network fencing are on by
-default. Fencing needs `*_BOX_RUNTIME=crun` on Linux, e.g.
-`OC_BOX_RUNTIME=crun opencode-box`; this is a plain container, not a VM.
-Keeping krun requires an explicit `--no-fence` and read/write on `/dev/kvm`
-(the `kvm` group). The runtime is never silently switched.
+default, under krun and crun alike. krun needs read/write on `/dev/kvm` (the
+`kvm` group); `*_BOX_RUNTIME=crun` runs a plain container instead, e.g.
+`OC_BOX_RUNTIME=crun opencode-box`. The runtime is never silently switched.
 
 Files created in the box by a non-root uid land in your subuid range on the
 host. The agents run as root, so that's rare.
