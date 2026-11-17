@@ -1661,7 +1661,10 @@ _box_fence_start() {
   done
   BOX_FENCE_NET="$BOX_NAME_PREFIX-net-$$"
   if [[ ${BOX_CTR[0]} == podman ]]; then
-    podman network create --internal "$BOX_FENCE_NET" >/dev/null
+    # No DNS: the box dials the proxy by address, and a network with DNS
+    # becomes the proxy's only resolver, which on an internal network can't
+    # resolve anything outside. Without it the proxy keeps the host's.
+    podman network create --internal --disable-dns "$BOX_FENCE_NET" >/dev/null
     _box_at_exit "podman network rm -f '$BOX_FENCE_NET' >/dev/null 2>&1"
   else
     # Apple's container has the same primitive (macOS 26): host-only, no route.

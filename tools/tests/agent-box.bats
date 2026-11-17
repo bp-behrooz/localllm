@@ -1573,9 +1573,9 @@ PY
   echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
   run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
   [[ $status -eq 0 ]]
-  call_has "network create --internal cl-net-"
   local net
-  net=$(sed -n 's/^podman network create --internal \(.*\)$/\1/p' "$FAKE_DIR/calls")
+  call_has "network create --internal --disable-dns cl-net-"
+  net=$(sed -n 's/^podman network create --internal --disable-dns \(.*\)$/\1/p' "$FAKE_DIR/calls")
   [[ -n $net ]]
   # the box is on it, and the proxy is the only container on both it and the
   # default network
@@ -1596,7 +1596,7 @@ PY
   echo '{"allow":"none"}' >"$HOME/.box.default.proxy.json"
   run_box --fence --shell -c true
   [[ $status -eq 0 ]]
-  call_has "network create --internal cl-net-"
+  call_has "network create --internal --disable-dns cl-net-"
   grep -q "^HTTPS_PROXY=http://127.0.0.2:8080$" "$FAKE_DIR/run.args"
 }
 
