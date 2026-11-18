@@ -1201,6 +1201,8 @@ box_docker_bridge() {
     }
     if ! _box_is_krun; then
       # The image's docker CLI already defaults to unix:///var/run/docker.sock.
+      # No relabel option: a socket's type is its own, and :z would replace it
+      # with a file type, which is not what lets the box connect (_box_vol).
       BOX_DOCKER_ENV+=(--volume "$sock:/var/run/docker.sock")
       echo "==> docker: $sock -> /var/run/docker.sock (this session only)" >&2
       return 0
@@ -1315,6 +1317,45 @@ _box_data_volumes() {
     n=$((n + 1))
   done < <(_box_volume_paths)
   echo "==> data: $n volume(s), ${prefix}*" >&2
+}
+
+# ----------------------------------------------------------------- mounts -----
+# SELinux (Fedora, RHEL): a bind mount whose source keeps the user's label is
+# unreadable inside the container -- container_t cannot open user_home_t -- and
+# the box sees an empty directory rather than a permission error, because the
+# shell's glob simply does not match. So podman needs a relabel option on every
+# host path. :z gives one shared label (a project, a home, a journal several
+# containers may read); :Z claims the path exclusively, for the per-launch proxy
+# directory nothing else reads. Apple's container takes neither and has no
+# SELinux to want them, so both stay out of its argv.
+#
+# Sockets are deliberately not covered: a socket's type is its own
+# (container_var_run_t for a runtime socket), and :z would relabel it to a file
+# type, which is not what lets a container connect.
+_box_selinux() {
+  [[ ${BOX_CTR[0]} == podman ]] || return 1
+  if [[ -z ${BOX_SELINUX-} ]]; then
+    BOX_SELINUX=0
+    case "$(podman info --format '{{.Host.Security.SELinuxEnabled}}' 2>/dev/null)" in
+    true) BOX_SELINUX=1 ;;
+    "")
+      # An older podman without the field: ask the kernel's own tool instead.
+      if [[ "$(getenforce 2>/dev/null)" == Enforcing ]]; then BOX_SELINUX=1; fi
+      ;;
+    esac
+  fi
+  [[ $BOX_SELINUX == 1 ]]
+}
+
+# _box_vol SRC DST [MODE] [private]: one --volume argument, relabelled when the
+# host enforces SELinux. MODE is ro or rw (or empty); private picks :Z, which
+# is right for a directory made for this launch and deleted when it ends.
+_box_vol() {
+  local spec="$1:$2" opt=${3-}
+  if _box_selinux; then
+    if [[ ${4-} == private ]]; then opt=${opt:+$opt,}Z; else opt=${opt:+$opt,}z; fi
+  fi
+  printf '%s' "$spec${opt:+:$opt}"
 }
 
 # ------------------------------------------------------------------ proxy -----
@@ -1437,9 +1478,9 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
   # the log with it. The exit trap removes it.
   local args=(-d --name "$name"
     -e BOX_PROXY_CONFIG=/etc/box-proxy/proxy.json
-    -v "$dir:/etc/box-proxy:ro"
-    -v "$dir/mitm:/ca:ro")
-  [[ -z $journal_dir ]] || args+=(-v "$journal_dir:/var/journal")
+    -v "$(_box_vol "$dir" /etc/box-proxy ro private)"
+    -v "$(_box_vol "$dir/mitm" /ca ro private)")
+  [[ -z $journal_dir ]] || args+=(-v "$(_box_vol "$journal_dir" /var/journal)")
 
   if [[ -n ${BOX_FENCE_NET-} ]]; then
     # Apple takes the gateway and DNS from the first network: default first.
@@ -1453,7 +1494,7 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
       # the Mac's gateway, which it dials; under podman any outside address
       # (TEST-NET-1, never dialed), as the fence network has no default route.
       if [[ ${BOX_CTR[0]} == podman ]]; then
-        args+=(-e "BOX_RELAY=192.0.2.1 ${BOX_RELAY_SPECS[*]}" -v "$BOX_RELAY_SOCKS:/run/box-relay")
+        args+=(-e "BOX_RELAY=192.0.2.1 ${BOX_RELAY_SPECS[*]}" -v "$(_box_vol "$BOX_RELAY_SOCKS" /run/box-relay rw private)")
       else
         args+=(-e "BOX_RELAY=$(_box_gateway) ${BOX_RELAY_SPECS[*]}")
       fi
@@ -1497,6 +1538,7 @@ print(" ".join(sorted({name for r in c.get("rules") or [] for name in r.get("fak
   # store into confdir and a bind mount is not writable from inside.
   "${BOX_CTR[@]}" run "${args[@]}" "$image" sh -c "$PROXY_SH" >&2 || {
     echo "error: --proxy: the proxy container did not start" >&2
+    _box_proxy_here "$name"
     exit 1
   }
 
@@ -1602,11 +1644,27 @@ EOF
   exit 1
 }
 
+# What the container itself says, before the exit trap removes it. "No address"
+# alone says nothing: the container may be dead with a one-line reason in a log
+# that the trap takes away with the launch.
+_box_proxy_here() {
+  local name=$1 status
+  if [[ ${BOX_CTR[0]} == podman ]]; then
+    status="$(podman inspect --format '{{.State.Status}} (exit {{.State.ExitCode}})' "$name" 2>/dev/null)" || status=
+    [[ -z $status ]] || echo "       the container is $status" >&2
+  fi
+  # stderr of the logs call itself is podman saying the container is gone, which
+  # the caller has just said; the container's own output is what is wanted.
+  "${BOX_CTR[@]}" logs "$name" 2>/dev/null | tail -n 40 | sed 's/^/       | /' >&2
+}
+
 # No address means the container never came up (its log says why), not that the
 # network is slow: dialing an empty host is what made this look like a hang.
 _box_proxy_no_address() {
   echo "error: --proxy: $1 has no address on network $2" >&2
-  echo "       its log usually says why: ${BOX_CTR[*]} logs $1" >&2
+  _box_proxy_here "$1"
+  echo "       (the container and its files go when this launch exits; rerun with" >&2
+  echo "       ${BOX_ENV_PREFIX}_PROXY_PRINT=1 to keep them and see the command)" >&2
   exit 1
 }
 
@@ -1992,7 +2050,7 @@ _box_git_dir_volume() {
       [[ $c == "$common" ]] && continue 2
     done
     commons+=("$common")
-    BOX_RUN_ARGS+=(--volume "$common:$common")
+    BOX_RUN_ARGS+=(--volume "$(_box_vol "$common" "$common")")
     echo "==> git: $common (outside \$PWD)" >&2
   done
 }
@@ -2004,6 +2062,9 @@ _box_git_dir_volume() {
 # Call box_docker_bridge first. The per-agent --env flags stay in the calling
 # script.
 box_run_args() {
+  # Decide the SELinux question once here: _box_vol runs in a subshell for each
+  # mount, so a cache it filled there would not be seen by the next one.
+  _box_selinux || :
   _box_git_env
   _box_gh_env
   _box_profile
@@ -2014,9 +2075,9 @@ box_run_args() {
   BOX_RUN_ARGS=(
     -i --rm
     --name "$BOX_RUN_NAME"
-    --volume "$PWD:$PWD"
+    --volume "$(_box_vol "$PWD" "$PWD")"
     --workdir "$PWD"
-    --volume "$BOX_HOME:/root"
+    --volume "$(_box_vol "$BOX_HOME" /root)"
     --tmpfs /tmp
     # mise refuses to read a project's mise.toml until it's trusted, and would
     # sit on a prompt no agent can answer. The box only ever sees $PWD.
@@ -2062,6 +2123,7 @@ box_run_args() {
           --env SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
         echo "==> ssh: agent -> tcp://127.0.0.1:$BOX_BRIDGE_PORT -> /tmp/ssh-agent.sock" >&2
       else
+        # A socket, not a file: no relabel option, as with the docker one.
         BOX_RUN_ARGS+=(--volume "$SSH_AUTH_SOCK:/ssh-agent.sock"
           --env SSH_AUTH_SOCK=/ssh-agent.sock)
       fi

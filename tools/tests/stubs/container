@@ -34,6 +34,10 @@ print(json.dumps([{"status": {"networks": [
     for n in nets]}}]))
 EOF
   ;;
+logs)
+  # what a container that failed to come up said before it went
+  [[ -z ${FAKE_PROXY_LOG-} ]] || printf '%s\n' "$FAKE_PROXY_LOG"
+  ;;
 ls)
   # the box `run` started, while it runs, at $FAKE_BOX_IP
   echo "ID  IMAGE  OS  ARCH  STATE  IP  CPUS  MEMORY  STARTED"

@@ -12,7 +12,17 @@ fi
 echo "podman $*" >>"$FAKE_DIR/calls"
 case $1 in
 build) cp "${!#}/Dockerfile" "$FAKE_DIR/Dockerfile" ;;
-info) echo "${FAKE_ROOTLESS:-true}" ;;
+info)
+  # The lib asks about SELinux separately; anything else wants the rootless flag.
+  if [[ $* == *SELinuxEnabled* ]]; then
+    echo "${FAKE_SELINUX:-false}"
+  else
+    echo "${FAKE_ROOTLESS:-true}"
+  fi
+  ;;
+logs)
+  [[ -z ${FAKE_PROXY_LOG-} ]] || printf '%s\n' "$FAKE_PROXY_LOG"
+  ;;
 network)
   # create/rm are recorded above; no other output needed.
   ;;

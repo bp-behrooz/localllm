@@ -39,6 +39,15 @@ podman system migrate                         # only if podman ran before that
 systemctl --user enable --now podman.socket   # only for --docker
 ```
 
+**Linux (Fedora/RHEL):** `sudo dnf install podman crun krun socat`, then the
+same subuid line as above. With SELinux enforcing, an unlabelled bind mount is
+unreadable inside the box -- `container_t` cannot open `user_home_t`, and the
+box sees an empty directory rather than an error -- so the lib adds `:z` to
+every host path it mounts, and `:Z` to the per-launch proxy directory. The first
+launch relabels `$PWD` and the box's home, which takes a moment on a large tree.
+`--ssh` and `--docker` mount sockets, whose types are their own and are not
+relabelled: expect to need a policy for them on such a host.
+
 podman must be rootless, so what the agent writes stays owned by you; the
 boxes refuse to start otherwise. Proxying and network fencing are on by
 default, under krun and crun alike. krun needs read/write on `/dev/kvm` (the

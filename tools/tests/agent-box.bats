@@ -1338,6 +1338,33 @@ EOF
   [[ $output != *"==> host:"* ]]
 }
 
+@test "proxy: an SELinux host gets relabelled mounts, and a Mac does not" {
+  export CL_BOX_RUNTIME=crun
+  proxy_stub
+  echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q -- ':/etc/box-proxy:ro$' "$FAKE_DIR/proxy.args"
+  grep -q -- ':/ca:ro$' "$FAKE_DIR/proxy.args"
+  run_has "$PWD:$PWD"
+  run_has "$HOME/.claude-box:/root"
+
+  # Enforcing: every host path needs a label, :Z for the launch's own dir.
+  FAKE_SELINUX=true run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q -- ':/etc/box-proxy:ro,Z$' "$FAKE_DIR/proxy.args"
+  grep -q -- ':/ca:ro,Z$' "$FAKE_DIR/proxy.args"
+  run_has "$PWD:$PWD:z"
+  run_has "$HOME/.claude-box:/root:z"
+
+  # Apple's container takes neither option, whatever the host reports.
+  as_mac
+  FAKE_SELINUX=true run_box --no-fence --proxy="$BATS_TEST_TMPDIR/proxy.json" --shell -c true
+  [[ $status -eq 0 ]]
+  grep -q -- ':/etc/box-proxy:ro$' "$FAKE_DIR/proxy.args"
+  run_has "$PWD:$PWD"
+}
+
 @test "proxy: a failed render leaves no rendered secrets behind" {
   export CL_BOX_RUNTIME=crun
   proxy_stub
@@ -1866,13 +1893,16 @@ PY
   export CL_BOX_RUNTIME=crun
   proxy_stub
   echo '{"allow":"none"}' >"$BATS_TEST_TMPDIR/proxy.json"
+  export FAKE_PROXY_LOG='box-proxy: no CA bundle in /ca; not starting with a CA of its own'
   local platform
   for platform in as_linux as_mac; do
     "$platform"
     FAKE_NO_IP=1 run_box --proxy="$BATS_TEST_TMPDIR/proxy.json" --fence --shell -c true
     [[ $status -ne 0 ]]
     [[ $output == *"has no address"* ]]
-    [[ $output == *"logs"* ]]
+    # the container's own line, before the exit trap takes it away
+    [[ $output == *"| box-proxy: no CA bundle in /ca"* ]]
+    [[ $output == *"_PROXY_PRINT=1"* ]]
   done
 }
 
