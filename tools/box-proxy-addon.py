@@ -315,6 +315,11 @@ class BoxProxy:
             flow.response = http.Response.make(
                 403, json.dumps({"error": "egress: not allowed", "host": host}).encode(),
                 {"Content-Type": "application/json"})
+            # Clients show a refused CONNECT's status line, not its body
+            # ("Proxy refused to open a tunnel: 403 ..."), so name the host in
+            # the reason too. Printable ASCII only: it goes on the status line.
+            shown = "".join(c for c in host if " " < c < "\x7f")[:253]
+            flow.response.reason = f"egress not allowed: {shown}"
             log(f"denied {flow.request.method} {host}{bare_path(flow)}")
             return False
         return True

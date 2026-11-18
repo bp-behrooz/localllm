@@ -62,6 +62,10 @@ class ProxyTests(unittest.TestCase):
         flow = self.flow('bad"\\host')
         proxy.request(flow)
         self.assertEqual(json.loads(flow.response.content)["host"], flow.request.pretty_host)
+        # the status line names the host, and nothing in it can break the line
+        flow = self.flow("a.example.com\r\nX: y")
+        proxy.http_connect(flow)
+        self.assertEqual(flow.response.reason, "egress not allowed: a.example.comX:y")
 
     def test_destination_spoofing_and_connect(self):
         proxy = addon.BoxProxy()
