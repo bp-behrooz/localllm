@@ -30,6 +30,9 @@ declare -A PRESET=(
   [nanbeige4.3]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh nanbeige4.3-33b-iq8r.rad --max-num-seqs 8 --kv-cache-dtype i8 --temp 0.6 --top-p 0.95"
   [nanbeige4.3-int4]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh nanbeige4.3-33b-int4.rad --max-num-seqs 8 --kv-cache-dtype i8 --temp 0.6 --top-p 0.95"
   [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-iqr-v4.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 24576 --gpu-headroom-mib 96 --kv-cache-dtype i8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
+  # The same model, uncensored fine-tune, same IQR-V4 size and layout, so the
+  # same flags. Takes another 114 GiB on the /opt disk next to the one above.
+  [qwen3.8-flash-next-uncensored]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-uncensored-iqr-v4.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 24576 --gpu-headroom-mib 96 --kv-cache-dtype i8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"
   # IQR-V4 on one card: 17.4 GiB of weights at 4.79 bpw (KL 0.00297), up to 8
   # sequences sharing the i8 KV pool (~380K tokens on one 32 GB card). The repo
   # holds all IQR-V4 sizes, not just this file, hence RAD_REPO.

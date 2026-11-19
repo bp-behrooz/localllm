@@ -36,7 +36,7 @@ exec podman run --replace --name "$NAME" \
   -v "$MODEL_DIR":/models:ro \
   -e HIP_VISIBLE_DEVICES="$GPUS" \
   --entrypoint sh "$IMAGE" -ec \
-  'cfg=$(mktemp /tmp/radiance.XXXXXX.yaml) && rad-yaml "$@" >"$cfg" && { echo "radiance config:"; cat "$cfg"; } >&2 && exec radiance --config "$cfg"' _ \
+  'umask 077 && cfg=$(mktemp -d /tmp/radiance.XXXXXX)/radiance.yaml && rad-yaml "$@" >"$cfg" && { echo "radiance config:"; cat "$cfg"; } >&2 && exec radiance --config "$cfg"' _ \
   --served-model-name "$preset" \
   --model "/models/$model" \
   --host :: --port "$PORT" --tp "$tp" --max-model-len "$MAXLEN" "$@"

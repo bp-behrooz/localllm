@@ -15,6 +15,11 @@ RDNA4 kernels and speculative decoding:
   (`--host-pool-mib 24576` total across both GPUs, so 12 GiB per card), and idle
   sessions move to RAM (up to 4 GiB). Sized for 2× 32 GB cards, 96 GB of RAM
   and the 114 GiB model on the `/opt` disk.
+- `qwen3.8-flash-next-uncensored`: the same Qwen3.8-Flash-Next in IQR-V4 as an
+  uncensored fine-tune ([`StillDeadcode/qwen3.8-next-flash-uncensored-iqr-v4`](https://huggingface.co/StillDeadcode/qwen3.8-next-flash-uncensored-iqr-v4)),
+  same size and engine flags, so it needs another 114 GiB on the `/opt` disk to
+  sit next to `qwen3.8-flash-next`. Not preloaded; both cards, first request
+  pays the cold start.
 - `qwen3.8-radiance`: Qwen3.8-27B in IQ8R (Hadamard-rotated int8, 28.8 GiB,
   KL 0.00039 vs 0.00363 for block FP8) with its DFlash2 drafter, 256K context.
 - `qwen3.8-iq4r`: Qwen3.8-27B in IQR-V4 (`qwen3.8-27b-iq4r-l-v4.rad`, 17.4 GiB,
