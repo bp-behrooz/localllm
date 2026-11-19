@@ -26,7 +26,7 @@ GPUS=(0 1)
 declare -A PRESET=(
   [thinkingcap]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh thinkingcap-qwen3.8-27b-iq8r-df2.rad --max-num-seqs 32 --kv-cache-dtype i8"
   [qwen3.8-radiance]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-27b-iq8r-dflash.rad --max-num-seqs 32 --kv-cache-dtype i8"
-  [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-w4a8 MAXLEN=262144 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad --max-num-seqs 8 --kv-cache-dtype i8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
+  [gemma4-heretic]="2|cmd|RAD_REPO=keptn/gemma4-31b-heretic-ara-a4 MAXLEN=262144 /opt/localllm/serve-radiance.sh gemma4-31b-heretic-ara-a4.rad --max-num-seqs 8 --kv-cache-dtype i8 --vision-tower-placement ram --num-speculative-tokens 3 --max-num-batched-tokens 2048 --temp 1.0 --top-p 0.95 --top-k 64"
   [nanbeige4.3]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh nanbeige4.3-33b-iq8r.rad --max-num-seqs 8 --kv-cache-dtype i8 --temp 0.6 --top-p 0.95"
   [nanbeige4.3-int4]="2|cmd|RAD_REPO=- MAXLEN=262144 /opt/localllm/serve-radiance.sh nanbeige4.3-33b-int4.rad --max-num-seqs 8 --kv-cache-dtype i8 --temp 0.6 --top-p 0.95"
   [qwen3.8-flash-next]="2|cmd|MAXLEN=262144 /opt/localllm/serve-radiance.sh qwen3.8-next-flash-iqr-v4.rad --tp-wire wht6 --max-num-seqs 8 --placement expert_tiered --host-pool-mib 24576 --gpu-headroom-mib 96 --kv-cache-dtype i8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048"

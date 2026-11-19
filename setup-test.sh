@@ -17,7 +17,7 @@ is_radiance qwen3.8-flash-next-uncensored || fail "flash-next-uncensored radianc
 [[ $RAD == qwen3.8-next-flash-uncensored-iqr-v4.rad ]] || fail "wrong flash-next-uncensored RAD: $RAD"
 [[ $RAD_REPO == StillDeadcode/qwen3.8-next-flash-uncensored-iqr-v4 ]] || fail "wrong flash-next-uncensored RAD_REPO: $RAD_REPO"
 is_radiance gemma4-heretic || fail "gemma4-heretic radiance preset not detected"
-[[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-w4a8 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
+[[ $RAD_REPO == keptn/gemma4-31b-heretic-ara-a4 ]] || fail "RAD_REPO not read from cmd: $RAD_REPO"
 is_radiance thinkingcap || fail "thinkingcap radiance preset not detected"
 [[ $RAD_REPO == - ]] || fail "local RAD_REPO=- not read: $RAD_REPO"
 is_radiance nanbeige4.3 || fail "nanbeige4.3 radiance preset not detected"
@@ -63,13 +63,13 @@ declare -F hf_fetch >/dev/null || fail "hf_fetch() not found in setup.sh"
 install() { :; }; sudo() { echo "fetched: $*"; }   # never reached on a clash
 HF_TOKEN=test   # download sources it from /opt/localllm/env
 # PRESET[t] (two .rads) stays in: a malformed other preset mustn't sink this download
-PRESET+=([g2]="2|cmd|RAD_REPO=other/fork serve-radiance.sh gemma4-31b-heretic-ara-w4a8.rad")
+PRESET+=([g2]="2|cmd|RAD_REPO=other/fork serve-radiance.sh gemma4-31b-heretic-ara-a4.rad")
 out=$(set -e; hf_fetch gemma4-heretic 2>&1); rc=$?
 [[ $rc -ne 0 && $out == *"rename one"* && $out != *fetched* ]] || fail "same .rad from two repos not refused: $out"
 unset 'PRESET[g2]'
 out=$(set -e; hf_fetch gemma4-heretic 2>&1) || fail "clash check failed a clean preset: $out"
 # the scan clobbers RAD/RAD_REPO along the way: the fetch must still be this preset's own
-[[ $out == *"hf download keptn/gemma4-31b-heretic-ara-w4a8 gemma4-31b-heretic-ara-w4a8.rad "* ]] \
+[[ $out == *"hf download keptn/gemma4-31b-heretic-ara-a4 gemma4-31b-heretic-ara-a4.rad "* ]] \
   || fail "clean preset fetched the wrong repo/file: $out"
 # a locally converted .rad (RAD_REPO=-) has nothing to download
 out=$(set -e; hf_fetch thinkingcap 2>&1) || fail "local .rad failed download: $out"
